@@ -65,7 +65,7 @@ class CameraService : Service() {
     private var mediaRecorder: MediaRecorder? = null
     private var recordingSurface: Surface? = null
 
-    // Candado de sincronización para operaciones de red
+    // Sincronización robusta para red
     private val netLock = Object()
     private var outStream: DataOutputStream? = null
     private var reconnectThread: Thread? = null
@@ -225,12 +225,11 @@ class CameraService : Service() {
     private fun closeCurrentCamera() {
         try {
             isStreaming.set(false)
-            
-            // Desenlazamos el listener para frenar la recepción de datos de inmediato
             imageReader?.setOnImageAvailableListener(null, null)
-            
             reconnectThread?.interrupt()
-            stopRecording()
+            
+            releaseMediaRecorder()
+            
             captureSession?.close()
             cameraDevice?.close()
             imageReader?.close()
@@ -284,6 +283,9 @@ class CameraService : Service() {
             currentCameraId = cameraId
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 5)
 
+            // CORRECCIÓN REDMI: Preparamos el MediaRecorder al arrancar para tener la superficie fija
+            prepareMediaRecorder()
+
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                 cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
@@ -297,6 +299,26 @@ class CameraService : Service() {
         } catch (e: Exception) { onCameraSetupFailed() }
     }
 
+    private fun prepareMediaRecorder() {
+        try {
+            val file = File(recordingsDir, "vid_${System.currentTimeMillis()}.mp4")
+            currentRecordingFile = file
+            mediaRecorder = MediaRecorder().apply {
+                setVideoSource(MediaRecorder.VideoSource.SURFACE)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+                setVideoSize(640, 480)
+                setVideoFrameRate(15)
+                setVideoEncodingBitRate(2_000_000)
+                setOutputFile(file.absolutePath)
+                prepare()
+            }
+            recordingSurface = mediaRecorder!!.surface
+        } catch (e: Exception) {
+            Log.e(TAG, "Error preparando MediaRecorder inicial", e)
+        }
+    }
+
     private fun startCaptureSession() {
         val device = cameraDevice ?: return
         try {
@@ -304,7 +326,8 @@ class CameraService : Service() {
             imageReader?.surface?.let { surfaces.add(it) }
             recordingSurface?.let { surfaces.add(it) }
 
-            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            // TEMPLATE_RECORD optimiza el consumo energético al procesar ambos destinos en paralelo
+            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             surfaces.forEach { requestBuilder.addTarget(it) }
 
             device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
@@ -314,7 +337,6 @@ class CameraService : Service() {
                         session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
                         onCameraReady()
                         
-                        // Activamos la escucha orientada a eventos en lugar del bucle while() bloqueante
                         startImageAvailableListener()
                         startReconnectLoop()
                     } catch (e: Exception) { onCameraSetupFailed() }
@@ -344,10 +366,6 @@ class CameraService : Service() {
         return false
     }
 
-    /**
-     * CORRECCIÓN: Event-driven streaming. Android nos avisa mediante callbacks
-     * en el hilo secundario ('cameraHandler') cuando un frame nuevo está listo.
-     */
     private fun startImageAvailableListener() {
         isStreaming.set(true)
         imageReader?.setOnImageAvailableListener({ reader ->
@@ -381,18 +399,13 @@ class CameraService : Service() {
                     sendFrame(jpegBytes)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error procesando el frame", e)
+                Log.e(TAG, "Error en procesamiento de frame", e)
             } finally {
-                // Súper crítico: Cerrar siempre la imagen para evitar Memory Leaks
-                image.close()
+                image.close() // Evita memory leaks críticos de hardware
             }
         }, cameraHandler)
     }
 
-    /**
-     * CORRECCIÓN: Se añade 'synchronized(netLock)' para evitar punteros nulos
-     * y mutaciones concurrentes mientras el hilo de reconexión levanta el puerto.
-     */
     private fun sendFrame(bytes: ByteArray) {
         synchronized(netLock) {
             try {
@@ -407,12 +420,29 @@ class CameraService : Service() {
         }
     }
 
+    // CORRECCIÓN REDMI: No destruimos la sesión. El hardware escribe directamente sobre el flujo existente.
     private fun startRecording() {
         if (isRecording) return
         try {
+            mediaRecorder?.start()
+            isRecording = true
+        } catch (e: Exception) { 
+            Log.e(TAG, "Error al iniciar grabación", e)
+            isRecording = false 
+        }
+    }
+
+    private fun stopRecording() {
+        if (!isRecording) return
+        try {
+            mediaRecorder?.stop()
+            isRecording = false
+            
+            // Re-inicializamos el recorder de fondo sin alterar el ciclo de hardware de la cámara
+            mediaRecorder?.reset()
             val file = File(recordingsDir, "vid_${System.currentTimeMillis()}.mp4")
             currentRecordingFile = file
-            mediaRecorder = MediaRecorder().apply {
+            mediaRecorder?.apply {
                 setVideoSource(MediaRecorder.VideoSource.SURFACE)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setVideoEncoder(MediaRecorder.VideoEncoder.H264)
@@ -422,35 +452,23 @@ class CameraService : Service() {
                 setOutputFile(file.absolutePath)
                 prepare()
             }
-            recordingSurface = mediaRecorder!!.surface
-            mediaRecorder?.start()
-            isRecording = true
-            cameraHandler.post { restartSession() }
-        } catch (e: Exception) { 
-            isRecording = false 
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al resetear MediaRecorder de forma segura", e)
         }
     }
 
-    private fun stopRecording() {
-        if (!isRecording) return
+    private fun releaseMediaRecorder() {
         try {
-            mediaRecorder?.stop()
+            if (isRecording) {
+                mediaRecorder?.stop()
+                isRecording = false
+            }
             mediaRecorder?.release()
             mediaRecorder = null
             recordingSurface = null
-            isRecording = false
-            cameraHandler.post { restartSession() }
         } catch (e: Exception) { }
     }
 
-    private fun restartSession() {
-        captureSession?.close()
-        startCaptureSession()
-    }
-
-    /**
-     * CORRECCIÓN: Estabilización de hilos concurrentes de red.
-     */
     private fun startReconnectLoop() {
         reconnectThread = thread(start = true) {
             while (isStreaming.get()) {

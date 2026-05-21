@@ -65,8 +65,9 @@ class CameraService : Service() {
     private var mediaRecorder: MediaRecorder? = null
     private var recordingSurface: Surface? = null
 
+    // Candado de sincronización para operaciones de red
+    private val netLock = Object()
     private var outStream: DataOutputStream? = null
-    private var captureThread: Thread? = null
     private var reconnectThread: Thread? = null
 
     private var cameraFacing = CameraCharacteristics.LENS_FACING_BACK
@@ -100,7 +101,6 @@ class CameraService : Service() {
     private var currentRecordingFile: File? = null
 
     private var setupRetryRunnable: Runnable? = null
-    private var currentRetryAttempts = 0
 
     private val availabilityCallback = object : CameraManager.AvailabilityCallback() {
         override fun onCameraAvailable(cameraId: String) {
@@ -225,17 +225,24 @@ class CameraService : Service() {
     private fun closeCurrentCamera() {
         try {
             isStreaming.set(false)
-            captureThread?.interrupt()
+            
+            // Desenlazamos el listener para frenar la recepción de datos de inmediato
+            imageReader?.setOnImageAvailableListener(null, null)
+            
             reconnectThread?.interrupt()
             stopRecording()
             captureSession?.close()
             cameraDevice?.close()
             imageReader?.close()
-            outStream?.close()
+            
+            synchronized(netLock) {
+                outStream?.close()
+                outStream = null
+            }
+            
             captureSession = null
             cameraDevice = null
             imageReader = null
-            outStream = null
         } catch (e: Exception) { }
     }
 
@@ -306,7 +313,9 @@ class CameraService : Service() {
                     try {
                         session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
                         onCameraReady()
-                        startStreamingLoop()
+                        
+                        // Activamos la escucha orientada a eventos en lugar del bucle while() bloqueante
+                        startImageAvailableListener()
                         startReconnectLoop()
                     } catch (e: Exception) { onCameraSetupFailed() }
                 }
@@ -335,58 +344,74 @@ class CameraService : Service() {
         return false
     }
 
-    private fun startStreamingLoop() {
-        if (isStreaming.get()) return
+    /**
+     * CORRECCIÓN: Event-driven streaming. Android nos avisa mediante callbacks
+     * en el hilo secundario ('cameraHandler') cuando un frame nuevo está listo.
+     */
+    private fun startImageAvailableListener() {
         isStreaming.set(true)
-        captureThread = thread(start = true) {
-            while (isStreaming.get()) {
-                try {
-                    val image = imageReader?.acquireLatestImage()
-                    if (image != null) {
-                        val yPlane = image.planes[0]
-                        val yBuffer = yPlane.buffer
-                        val yData = ByteArray(yBuffer.remaining())
-                        yBuffer.get(yData)
+        imageReader?.setOnImageAvailableListener({ reader ->
+            if (!isStreaming.get()) return@setOnImageAvailableListener
+            
+            val image = try {
+                reader.acquireLatestImage()
+            } catch (e: Exception) {
+                null
+            } ?: return@setOnImageAvailableListener
 
-                        if (motionDetectionEnabled) {
-                            if (motionDetector.detectMotion(yData, image.width, image.height)) {
-                                lastMotionTime = System.currentTimeMillis()
-                                if (!isRecording) startRecording()
-                            }
-                            if (isRecording && System.currentTimeMillis() - lastMotionTime > motionTimeoutMs) {
-                                stopRecording()
-                            }
-                        }
+            try {
+                val yPlane = image.planes[0]
+                val yBuffer = yPlane.buffer
+                val yData = ByteArray(yBuffer.remaining())
+                yBuffer.get(yData)
 
-                        val jpegBytes = yuvImageToJpeg(image)
-                        image.close()
-
-                        if (jpegBytes != null) {
-                            latestFrameBytes = jpegBytes
-                            sendFrame(jpegBytes)
-                        }
-                    } else {
-                        Thread.sleep(30)
+                if (motionDetectionEnabled) {
+                    if (motionDetector.detectMotion(yData, image.width, image.height)) {
+                        lastMotionTime = System.currentTimeMillis()
+                        if (!isRecording) startRecording()
                     }
-                } catch (e: Exception) { Thread.sleep(100) }
+                    if (isRecording && System.currentTimeMillis() - lastMotionTime > motionTimeoutMs) {
+                        stopRecording()
+                    }
+                }
+
+                val jpegBytes = yuvImageToJpeg(image)
+                if (jpegBytes != null) {
+                    latestFrameBytes = jpegBytes
+                    sendFrame(jpegBytes)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error procesando el frame", e)
+            } finally {
+                // Súper crítico: Cerrar siempre la imagen para evitar Memory Leaks
+                image.close()
             }
-        }
+        }, cameraHandler)
     }
 
+    /**
+     * CORRECCIÓN: Se añade 'synchronized(netLock)' para evitar punteros nulos
+     * y mutaciones concurrentes mientras el hilo de reconexión levanta el puerto.
+     */
     private fun sendFrame(bytes: ByteArray) {
-        try {
-            outStream?.let {
-                it.writeInt(bytes.size)
-                it.write(bytes)
-                it.flush()
+        synchronized(netLock) {
+            try {
+                outStream?.let {
+                    it.writeInt(bytes.size)
+                    it.write(bytes)
+                    it.flush()
+                }
+            } catch (e: Exception) {
+                outStream = null 
             }
-        } catch (e: Exception) { outStream = null }
+        }
     }
 
     private fun startRecording() {
         if (isRecording) return
         try {
             val file = File(recordingsDir, "vid_${System.currentTimeMillis()}.mp4")
+            currentRecordingFile = file
             mediaRecorder = MediaRecorder().apply {
                 setVideoSource(MediaRecorder.VideoSource.SURFACE)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -401,7 +426,9 @@ class CameraService : Service() {
             mediaRecorder?.start()
             isRecording = true
             cameraHandler.post { restartSession() }
-        } catch (e: Exception) { isRecording = false }
+        } catch (e: Exception) { 
+            isRecording = false 
+        }
     }
 
     private fun stopRecording() {
@@ -421,17 +448,31 @@ class CameraService : Service() {
         startCaptureSession()
     }
 
+    /**
+     * CORRECCIÓN: Estabilización de hilos concurrentes de red.
+     */
     private fun startReconnectLoop() {
         reconnectThread = thread(start = true) {
             while (isStreaming.get()) {
                 try {
-                    if (outStream == null) {
+                    var needsReconnect = false
+                    synchronized(netLock) {
+                        if (outStream == null) {
+                            needsReconnect = true
+                        }
+                    }
+
+                    if (needsReconnect) {
                         val socket = Socket(clientIp, PORT)
                         socket.tcpNoDelay = true
-                        outStream = DataOutputStream(socket.getOutputStream())
+                        synchronized(netLock) {
+                            outStream = DataOutputStream(socket.getOutputStream())
+                        }
                     }
                     Thread.sleep(5000)
-                } catch (e: Exception) { Thread.sleep(5000) }
+                } catch (e: Exception) { 
+                    Thread.sleep(5000) 
+                }
             }
         }
     }
@@ -456,7 +497,9 @@ class CameraService : Service() {
             val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
             yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 80, out)
             return out.toByteArray()
-        } catch (e: Exception) { return null }
+        } catch (e: Exception) { 
+            return null 
+        }
     }
 
     override fun onDestroy() {

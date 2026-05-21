@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remoto - ScreenShare</title>
+    <style>
+        body { background: #111; color: white; font-family: Arial; padding: 20px; text-align: center; }
+        img { max-width: 90%; border: 1px solid #333; margin: 10px; background: #000; }
+        button { padding: 12px; margin: 5px; cursor: pointer; background: #2a4a8c; color: white; border: none; border-radius: 8px; font-weight: bold; }
+        .danger { background: #8c2a2a; }
+        .success { background: #2a8c4a; }
+        .info { margin: 10px; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <h2>🌍 Control Remoto ScreenShare</h2>
+    <div id="loginArea">
+        <p>Código de sala:</p>
+        <input type="text" id="roomIdInput" placeholder="Ej: A1B2C3" maxlength="6" style="font-size:20px;text-transform:uppercase;padding:10px;width:200px;">
+        <button onclick="connect()">Conectar</button>
+        <p id="status"></p>
+    </div>
+    <div id="controlArea" style="display:none;">
+        <p class="info">Sala: <strong id="roomDisplay"></strong></p>
+        <div>
+            <button class="success" onclick="sendCommand('START_SCREEN')">📺 Pantalla</button>
+            <button onclick="sendCommand('START_BACK')">📷 Cámara Trasera</button>
+            <button onclick="sendCommand('START_FRONT')">🤳 Cámara Frontal</button>
+            <button onclick="sendCommand('STOP_CAMERA')">⏹️ Parar Cámara</button>
+            <button class="danger" onclick="sendCommand('STOP')">🛑 Parar Todo</button>
+        </div>
+        <img id="screenStream" alt="Pantalla (esperando...)" />
+        <img id="cameraStream" alt="Cámara (esperando...)" />
+    </div>
+
+    <script>
+        const relayUrl = "wss://webservice-1-v8s5.onrender.com";
+        let ws = null;
+
+        function connect() {
+            const roomId = document.getElementById('roomIdInput').value.trim().toUpperCase();
+            const statusEl = document.getElementById('status');
+            if (!roomId || roomId.length !== 6) {
+                statusEl.textContent = "Ingrese un código de sala válido (6 caracteres)";
+                return;
+            }
+            statusEl.textContent = "Conectando...";
+            document.getElementById('roomDisplay').textContent = roomId;
+
+            ws = new WebSocket(`${relayUrl}?roomId=${roomId}&role=web`);
+
+            ws.onopen = () => {
+                document.getElementById('loginArea').style.display = 'none';
+                document.getElementById('controlArea').style.display = 'block';
+                statusEl.textContent = "";
+            };
+
+            ws.onmessage = (event) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const bytes = new Uint8Array(reader.result);
+                    const headerEnd = bytes.indexOf(10); 
+                    if (headerEnd > 0) {
+                        const headerBytes = bytes.slice(0, headerEnd);
+                        const header = new TextDecoder().decode(headerBytes);
+                        const jpegBytes = bytes.slice(headerEnd + 1);
+                        const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+                        const url = URL.createObjectURL(blob);
+                        if (header === 'SCREEN:') {
+                            document.getElementById('screenStream').src = url;
+                        } else if (header === 'CAMERA:') {
+                            document.getElementById('cameraStream').src = url;
+                        }
+                    }
+                };
+                reader.readAsArrayBuffer(event.data);
+            };
+
+            ws.onerror = () => {
+                statusEl.textContent = "Error de conexión. Intente de nuevo.";
+            };
+
+            ws.onclose = () => {
+                if (document.getElementById('controlArea').style.display !== 'none') {
+                    alert("Conexión cerrada. Recargue la página para reintentar.");
+                }
+            };
+        }
+
+        function sendCommand(cmd) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(cmd);
+            } else {
+                alert("No hay conexión. Presione Conectar primero.");
+            }
+        }
+    </script>
+</body>
+</html>

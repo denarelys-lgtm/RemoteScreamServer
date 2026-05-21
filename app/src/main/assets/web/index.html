@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScreenShare Panel</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0f1e;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; width: 100%; }
+        .login-box, .dashboard {
+            background: #1a1f2f;
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+        }
+        h2, h3 { margin-top: 0; color: #aaccff; }
+        input, button {
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 8px;
+            border: none;
+            font-size: 16px;
+            width: 100%;
+        }
+        input {
+            background: #0e121f;
+            color: white;
+            border: 1px solid #2f3a5c;
+        }
+        button {
+            background: #2a4a8c;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #3a6ab0; }
+        button.danger { background: #8c2a2a; }
+        button.danger:hover { background: #b03a3a; }
+        button.success { background: #2a8c4a; }
+        button.success:hover { background: #3ab06a; }
+        .streams {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .stream-card {
+            flex: 1 1 300px;
+            background: #0e121f;
+            border-radius: 12px;
+            padding: 12px;
+        }
+        .stream-card img {
+            width: 100%;
+            border-radius: 8px;
+            background: #000;
+            min-height: 200px;
+        }
+        .control-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 20px 0;
+            padding: 16px;
+            background: #0e121f;
+            border-radius: 12px;
+        }
+        .control-bar button {
+            width: auto;
+            flex: 1;
+            min-width: 100px;
+        }
+        .config-section {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #2f3a5c;
+        }
+        .error { color: #ff8a8a; margin-top: 10px; }
+        .logout-btn { background: #5a2a2a; }
+        .logout-btn:hover { background: #8a3a3a; }
+        .flex-row { display: flex; gap: 16px; }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status-available { background: #2a8c4a; color: white; }
+        .status-unavailable { background: #8c2a2a; color: white; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div id="loginBox" class="login-box">
+        <h2>🔐 Panel de Control</h2>
+        <input type="password" id="password" placeholder="Contraseña del panel" autocomplete="off">
+        <button onclick="login()">Ingresar</button>
+        <p id="loginError" class="error"></p>
+    </div>
+
+    <div id="dashboard" class="dashboard" style="display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2>📡 Panel de Control Remoto</h2>
+            <button class="logout-btn" style="width: auto;" onclick="logout()">Cerrar sesión</button>
+        </div>
+
+        <div class="control-bar">
+            <button class="success" onclick="sendCommand('START_SCREEN')">📺 PANTALLA</button>
+            <button onclick="sendCommand('START_BACK')">📷 CAM TRAS</button>
+            <button onclick="sendCommand('START_FRONT')">🤳 CAM FRONT</button>
+            <button onclick="sendCommand('STOP_CAMERA')">⏹️ PARAR CAM</button>
+            <button class="danger" onclick="sendCommand('STOP')">🛑 PARAR TODO</button>
+        </div>
+
+        <div class="streams">
+            <div class="stream-card">
+                <h3>📺 Pantalla</h3>
+                <img id="screenStream" src="/screen.mjpeg" alt="Pantalla" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'300\' height=\'200\'%3E%3Crect width=\'300\' height=\'200\' fill=\'%23111\'/%3E%3Ctext x=\'50%25\' y=\'50%25\' fill=\'%23888\' text-anchor=\'middle\' dy=\'.3em\'%3ESin señal%3C/text%3E%3C/svg%3E'">
+            </div>
+            <div class="stream-card">
+                <h3>📷 Cámara <span id="cameraStatus" class="status-badge status-unavailable">Detenida</span></h3>
+                <img id="cameraStream" src="/camera.mjpeg" alt="Cámara" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'300\' height=\'200\'%3E%3Crect width=\'300\' height=\'200\' fill=\'%23111\'/%3E%3Ctext x=\'50%25\' y=\'50%25\' fill=\'%23888\' text-anchor=\'middle\' dy=\'.3em\'%3ESin señal%3C/text%3E%3C/svg%3E'">
+            </div>
+        </div>
+
+        <div class="config-section">
+            <h3>⚙️ Configuración</h3>
+            <div class="flex-row">
+                <div style="flex:1">
+                    <input type="password" id="newPanelPass" placeholder="Nueva contraseña panel">
+                    <button onclick="changePanelPassword()">Cambiar contraseña panel</button>
+                </div>
+                <div style="flex:1">
+                    <input type="password" id="newStreamPass" placeholder="Nueva contraseña streaming">
+                    <button onclick="changeStreamPassword()">Cambiar contraseña streaming</button>
+                </div>
+            </div>
+            <p id="configMsg" style="color: #aaffaa;"></p>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API = {
+        login: '/api/login',
+        command: '/api/command',
+        changePanel: '/api/change-panel-password',
+        changeStream: '/api/change-stream-password',
+        cameraStatus: '/api/camera-status'
+    };
+
+    let cameraStatusSpan = document.getElementById('cameraStatus');
+
+    async function login() {
+        const pass = document.getElementById('password').value;
+        const response = await fetch(API.login, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'password=' + encodeURIComponent(pass),
+            credentials: 'same-origin'
+        });
+        const data = await response.json();
+        if (data.success) {
+            document.getElementById('loginBox').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+            document.getElementById('screenStream').src = '/screen.mjpeg?' + Date.now();
+            document.getElementById('cameraStream').src = '/camera.mjpeg?' + Date.now();
+        } else {
+            document.getElementById('loginError').innerText = 'Contraseña incorrecta';
+        }
+    }
+
+    async function sendCommand(cmd) {
+        try {
+            const response = await fetch(API.command, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'cmd=' + encodeURIComponent(cmd),
+                credentials: 'same-origin'
+            });
+            if (!response.ok) {
+                console.error('Error HTTP:', response.status);
+            }
+        } catch (e) {
+            console.error('Error enviando comando:', e);
+        }
+    }
+
+    async function changePanelPassword() {
+        const pass = document.getElementById('newPanelPass').value;
+        if (!pass) return;
+        const response = await fetch(API.changePanel, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'new_password=' + encodeURIComponent(pass),
+            credentials: 'same-origin'
+        });
+        const data = await response.json();
+        document.getElementById('configMsg').innerText = data.success ? 'Contraseña del panel actualizada' : 'Error al actualizar';
+        if (data.success) document.getElementById('newPanelPass').value = '';
+    }
+
+    async function changeStreamPassword() {
+        const pass = document.getElementById('newStreamPass').value;
+        if (!pass) return;
+        const response = await fetch(API.changeStream, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'new_password=' + encodeURIComponent(pass),
+            credentials: 'same-origin'
+        });
+        const data = await response.json();
+        document.getElementById('configMsg').innerText = data.success ? 'Contraseña de streaming actualizada' : 'Error al actualizar';
+        if (data.success) document.getElementById('newStreamPass').value = '';
+    }
+
+    function logout() {
+        document.cookie = 'auth_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+        location.reload();
+    }
+
+    document.getElementById('password').addEventListener('keypress', (e) => {
+        if(e.key === 'Enter') login();
+    });
+
+    async function updateCameraStatus() {
+        try {
+            const response = await fetch(API.cameraStatus);
+            const data = await response.json();
+            if (cameraStatusSpan) {
+                if (data.available) {
+                    cameraStatusSpan.textContent = data.streaming ? 'Transmitiendo' : 'Disponible';
+                    cameraStatusSpan.className = 'status-badge ' + (data.streaming ? 'status-available' : '');
+                } else {
+                    cameraStatusSpan.textContent = 'No disponible';
+                    cameraStatusSpan.className = 'status-badge status-unavailable';
+                }
+            }
+        } catch (e) {
+            console.error('Error estado cámara:', e);
+        }
+    }
+
+    setInterval(updateCameraStatus, 2000);
+    updateCameraStatus();
+</script>
+</body>
+</html>

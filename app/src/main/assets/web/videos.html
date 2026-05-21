@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Vídeos Grabados</title>
+    <style>
+        body { background: #111; color: white; font-family: Arial; padding: 20px; }
+        .item { margin: 10px 0; padding: 10px; background: #222; border-radius: 8px; }
+        video { width: 100%; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <h2>📼 Vigilancia Grabada</h2>
+    <div id="list"></div>
+    <script>
+        fetch('/api/videos')
+            .then(r => r.json())
+            .then(v => {
+                const div = document.getElementById('list');
+                if (v.length === 0) div.innerHTML = '<p>No hay vídeos aún.</p>';
+                v.forEach(vid => {
+                    div.innerHTML += `<div class="item">
+                        <p>${vid.name} - ${new Date(vid.date).toLocaleString()}</p>
+                        <video controls><source src="/api/video/${vid.name}" type="video/mp4"></video>
+                    </div>`;
+                });
+            });
+    </script>
+</body>
+</html>

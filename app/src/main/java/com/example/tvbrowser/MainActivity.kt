@@ -13,10 +13,7 @@ import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.Bundle
-import android.os.PowerManager
-import android.os.SystemClock
+import android.os.*
 import android.provider.Settings
 import android.util.Log
 import android.view.View
@@ -33,14 +30,16 @@ import kotlin.concurrent.thread
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
+
     private lateinit var shareButton: Button
     private lateinit var panicButton: Button
     private lateinit var mainLayout: ConstraintLayout
     private lateinit var mediaProjectionManager: MediaProjectionManager
+
     private val SCREEN_CAPTURE_REQUEST_CODE = 1000
     private val REQUEST_CAMERA_PERMISSION = 1001
     private val REQUEST_IGNORE_BATTERY = 1002
-    private var isDimmed = false
+
     private var isServiceRunning = false
     private var pendingCameraFacing = CameraCharacteristics.LENS_FACING_BACK
 
@@ -56,7 +55,6 @@ class MainActivity : AppCompatActivity() {
     private val SERVICE_TYPE = "_screenstream._tcp."
     private val SERVICE_NAME = "ScreenSharePro"
 
-    // --- Relé ---
     private var currentRoomId: String? = null
 
     private val cameraEventReceiver = object : BroadcastReceiver() {
@@ -64,28 +62,15 @@ class MainActivity : AppCompatActivity() {
             when (intent.action) {
                 CameraService.ACTION_CAMERA_AVAILABLE -> {
                     val facing = intent.getIntExtra(CameraService.EXTRA_CAMERA_FACING, -1)
-                    val cameraName = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
-                    Toast.makeText(this@MainActivity, "Cámara $cameraName disponible", Toast.LENGTH_SHORT).show()
+                    val name = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
+                    Toast.makeText(this@MainActivity, "Cámara $name disponible", Toast.LENGTH_SHORT).show()
                 }
                 CameraService.ACTION_CAMERA_UNAVAILABLE -> {
                     val facing = intent.getIntExtra(CameraService.EXTRA_CAMERA_FACING, -1)
-                    val cameraName = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
-                    Toast.makeText(this@MainActivity, "Cámara $cameraName en uso por otra app", Toast.LENGTH_SHORT).show()
+                    val name = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
+                    Toast.makeText(this@MainActivity, "Cámara $name en uso por otra app", Toast.LENGTH_SHORT).show()
                 }
-                "STOP_CAMERA_FROM_NOTIFICATION" -> {
-                    stopService(Intent(this@MainActivity, CameraService::class.java))
-                    prefs.edit().remove("last_camera_facing").apply()
-                    Toast.makeText(this@MainActivity, "Cámara detenida", Toast.LENGTH_SHORT).show()
-                }
-                "SWITCH_CAMERA_FROM_NOTIFICATION" -> {
-                    val currentFacing = prefs.getInt("last_camera_facing", CameraCharacteristics.LENS_FACING_BACK)
-                    val newFacing = if (currentFacing == CameraCharacteristics.LENS_FACING_BACK)
-                        CameraCharacteristics.LENS_FACING_FRONT
-                    else
-                        CameraCharacteristics.LENS_FACING_BACK
-                    startCameraWithPermissionCheck(newFacing)
-                    Toast.makeText(this@MainActivity, "Cambiando cámara...", Toast.LENGTH_SHORT).show()
-                }
+                "STOP_CAMERA_FROM_NOTIFICATION" -> stopCameraService()
             }
         }
     }
@@ -102,36 +87,26 @@ class MainActivity : AppCompatActivity() {
 
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
 
-        // Generar o recuperar Room ID para acceso remoto
-        currentRoomId = prefs.getString("room_id", null)
-        if (currentRoomId == null) {
-            currentRoomId = generateRoomId()
-            prefs.edit().putString("room_id", currentRoomId).apply()
+        currentRoomId = prefs.getString("room_id", null) ?: generateRoomId().also {
+            prefs.edit().putString("room_id", it).apply()
         }
         Toast.makeText(this, "Código de sala: $currentRoomId", Toast.LENGTH_LONG).show()
-        Log.d("MainActivity", "Código de sala: $currentRoomId")
 
         requestBatteryOptimizationExemption()
         scheduleWatchdog()
 
-        val filter = IntentFilter().apply {
-            addAction(CameraService.ACTION_CAMERA_AVAILABLE)
-            addAction(CameraService.ACTION_CAMERA_UNAVAILABLE)
-            addAction("STOP_CAMERA_FROM_NOTIFICATION")
-            addAction("SWITCH_CAMERA_FROM_NOTIFICATION")
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(cameraEventReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(cameraEventReceiver, filter)
-        }
-
+        registerCameraReceiver()
         startCommandListener()
         registerMdnsService()
 
         startService(Intent(this, WebServerService::class.java))
         startRelayService()
 
+        setupButtons()
+        restoreLastCamera()
+    }
+
+    private fun setupButtons() {
         shareButton.setOnClickListener {
             if (!isServiceRunning) {
                 val intent = mediaProjectionManager.createScreenCaptureIntent()
@@ -144,13 +119,25 @@ class MainActivity : AppCompatActivity() {
             finishAndRemoveTask()
         }
 
-        mainLayout.setOnClickListener { if (isDimmed) toggleDimMode(false) }
-        restoreServices()
+        mainLayout.setOnClickListener { }
     }
 
     private fun generateRoomId(): String {
         val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         return (1..6).map { chars[Random.nextInt(chars.length)] }.joinToString("")
+    }
+
+    private fun registerCameraReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(CameraService.ACTION_CAMERA_AVAILABLE)
+            addAction(CameraService.ACTION_CAMERA_UNAVAILABLE)
+            addAction("STOP_CAMERA_FROM_NOTIFICATION")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(cameraEventReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(cameraEventReceiver, filter)
+        }
     }
 
     private fun startRelayService() {
@@ -180,17 +167,15 @@ class MainActivity : AppCompatActivity() {
         registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Servicio mDNS registrado: ${nsdServiceInfo.serviceName}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "mDNS registrado correctamente", Toast.LENGTH_SHORT).show()
                 }
             }
-
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Fallo al registrar mDNS (código $errorCode)", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Fallo mDNS: $errorCode", Toast.LENGTH_SHORT).show()
                 }
                 multicastLock?.release()
             }
-
             override fun onServiceUnregistered(arg0: NsdServiceInfo) {}
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
         }
@@ -198,26 +183,68 @@ class MainActivity : AppCompatActivity() {
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
     }
 
-    private fun unregisterMdnsService() {
-        registrationListener?.let {
-            nsdManager.unregisterService(it)
+    private fun startCommandListener() {
+        listeningThread = thread(start = true) {
+            try {
+                serverSocket = ServerSocket(9001, 50, InetAddress.getByName("0.0.0.0"))
+                while (!Thread.currentThread().isInterrupted) {
+                    val client = serverSocket?.accept() ?: break
+                    val clientIp = client.inetAddress.hostAddress
+                    if (clientIp != null && clientIp != "127.0.0.1") {
+                        prefs.edit().putString("client_ip", clientIp).apply()
+                    }
+
+                    val command = client.getInputStream().bufferedReader().readLine()
+                    client.close()
+
+                    runOnUiThread {
+                        when (command) {
+                            "START_SCREEN" -> shareButton.performClick()
+                            "START_BACK" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_BACK)
+                            "START_FRONT" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_FRONT)
+                            "STOP_CAMERA", "STOP" -> stopCameraService()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (!Thread.currentThread().isInterrupted) Log.e("CommandListener", "Error", e)
+            }
         }
-        multicastLock?.release()
     }
 
-    private fun scheduleWatchdog() {
-        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, WatchdogService::class.java)
-        val pendingIntent = PendingIntent.getService(
-            this, 0, intent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        )
-        alarmManager.setInexactRepeating(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            SystemClock.elapsedRealtime() + 5 * 60 * 1000,
-            5 * 60 * 1000,  // 5 minutos
-            pendingIntent
-        )
+    private fun startCameraWithPermissionCheck(facing: Int) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingCameraFacing = facing
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+        } else {
+            startCameraService(facing)
+        }
+    }
+
+    private fun startCameraService(facing: Int) {
+        stopCameraService() // Cerrar antes de iniciar para evitar conflictos
+
+        val intent = Intent(this, CameraService::class.java).apply {
+            putExtra("FACING", facing)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        prefs.edit().putInt("last_camera_facing", facing).apply()
+    }
+
+    private fun stopCameraService() {
+        stopService(Intent(this, CameraService::class.java))
+        prefs.edit().remove("last_camera_facing").apply()
+    }
+
+    private fun restoreLastCamera() {
+        val lastFacing = prefs.getInt("last_camera_facing", -1)
+        if (lastFacing != -1) {
+            startCameraWithPermissionCheck(lastFacing)
+        }
     }
 
     private fun requestBatteryOptimizationExemption() {
@@ -232,122 +259,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun restoreServices() {
-        val cameraFacing = prefs.getInt("last_camera_facing", -1)
-        if (cameraFacing != -1) {
-            startCameraWithPermissionCheck(cameraFacing)
-        }
+    private fun scheduleWatchdog() {
+        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, WatchdogService::class.java)
+        val pendingIntent = PendingIntent.getService(
+            this, 0, intent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        )
+        alarmManager.setInexactRepeating(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + 5 * 60 * 1000,
+            5 * 60 * 1000,
+            pendingIntent
+        )
     }
 
-    private fun startCommandListener() {
-        listeningThread = thread(start = true) {
-            try {
-                serverSocket = ServerSocket(9001, 50, InetAddress.getByName("0.0.0.0"))
-                while (!Thread.currentThread().isInterrupted) {
-                    try {
-                        val client = serverSocket?.accept() ?: break
-                        val clientIp = client.inetAddress.hostAddress
-                        if (clientIp != null && clientIp != "127.0.0.1") {
-                            prefs.edit().putString("client_ip", clientIp).apply()
-                            Log.d("MainActivity", "Cliente conectado desde IP: $clientIp")
-                        }
-
-                        val command = client.getInputStream().bufferedReader().readLine()
-                        runOnUiThread {
-                            when {
-                                command == "START_SCREEN" -> if (!isServiceRunning) shareButton.performClick()
-                                command == "START_BACK" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_BACK)
-                                command == "START_FRONT" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_FRONT)
-                                command == "STOP_CAMERA" -> {
-                                    stopService(Intent(this, CameraService::class.java))
-                                    prefs.edit().remove("last_camera_facing").apply()
-                                }
-                                command == "STOP" -> stopStreamingProcess()
-                            }
-                        }
-                        client.close()
-                    } catch (e: Exception) {
-                        if (!Thread.currentThread().isInterrupted) {
-                            e.printStackTrace()
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun startCameraWithPermissionCheck(facing: Int) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingCameraFacing = facing
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                REQUEST_CAMERA_PERMISSION
-            )
-        } else {
-            startCameraService(facing)
-        }
-    }
-
-    private fun startCameraService(facing: Int) {
-        val intent = Intent(this, CameraService::class.java).apply {
-            putExtra("FACING", facing)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
-        prefs.edit().putInt("last_camera_facing", facing).apply()
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CAMERA_PERMISSION) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    startCameraService(pendingCameraFacing)
-                }, 100)
-            } else {
-                Toast.makeText(this, "Se necesita permiso de cámara", Toast.LENGTH_SHORT).show()
-            }
+        if (requestCode == REQUEST_CAMERA_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startCameraService(pendingCameraFacing)
+        } else {
+            Toast.makeText(this, "Se necesita permiso de cámara", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun stopStreamingProcess() {
         stopService(Intent(this, ScreenCastService::class.java))
-        stopService(Intent(this, CameraService::class.java))
+        stopCameraService()
         stopService(Intent(this, RelayService::class.java))
         prefs.edit().remove("last_camera_facing").remove("screen_streaming").apply()
-        toggleDimMode(false)
-        isServiceRunning = false
-    }
-
-    private fun toggleDimMode(activate: Boolean) {
-        isDimmed = activate
-        val params = window.attributes
-        if (activate) {
-            params.screenBrightness = 0.01f
-            mainLayout.setBackgroundColor(Color.BLACK)
-            shareButton.visibility = View.INVISIBLE
-            isServiceRunning = true
-            prefs.edit().putBoolean("screen_streaming", true).apply()
-        } else {
-            params.screenBrightness = -1f
-            mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"))
-            shareButton.visibility = View.VISIBLE
-            isServiceRunning = false
-            prefs.edit().putBoolean("screen_streaming", false).apply()
-        }
-        window.attributes = params
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -364,8 +304,7 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         startService(serviceIntent)
                     }
-                    toggleDimMode(true)
-                    prefs.edit().putString("media_projection_token", "stored").apply()
+                    isServiceRunning = true
                 }
             }
             REQUEST_IGNORE_BATTERY -> {
@@ -380,11 +319,12 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         unregisterReceiver(cameraEventReceiver)
         listeningThread?.interrupt()
-        try {
-            serverSocket?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { serverSocket?.close() } catch (e: Exception) {}
         unregisterMdnsService()
+    }
+
+    private fun unregisterMdnsService() {
+        registrationListener?.let { nsdManager.unregisterService(it) }
+        multicastLock?.release()
     }
 }

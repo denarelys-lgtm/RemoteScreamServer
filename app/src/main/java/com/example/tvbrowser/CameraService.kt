@@ -40,7 +40,7 @@ class CameraService : Service() {
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
-        // === CIFRADO (Requerido por WebServerService) ===
+        // CIFRADO (necesario para WebServerService)
         private var cipher: Cipher? = null
         private var secretKey: SecretKeySpec? = null
 
@@ -73,6 +73,7 @@ class CameraService : Service() {
     private var cameraFacing = CameraCharacteristics.LENS_FACING_BACK
     private var sensorOrientation: Int = 90
 
+    private val busyLock = Object()
     private var isCameraBusy = false
     private var pendingFacing: Int? = null
 
@@ -100,7 +101,7 @@ class CameraService : Service() {
                 isCameraAvailable = false
                 sendCameraAvailabilityToClient(false)
                 sendLocalBroadcast(ACTION_CAMERA_UNAVAILABLE, cameraFacing)
-                cameraHandler.post { closeCurrentCamera() }
+                cameraHandler.post { safeCloseCamera() }
             }
         }
     }
@@ -133,17 +134,23 @@ class CameraService : Service() {
         startForegroundService()
 
         val requestedFacing = intent?.getIntExtra("FACING", CameraCharacteristics.LENS_FACING_BACK) ?: CameraCharacteristics.LENS_FACING_BACK
-        cameraFacing = requestedFacing
+
+        synchronized(busyLock) {
+            if (isCameraBusy) {
+                pendingFacing = requestedFacing
+                return START_STICKY
+            }
+            cameraFacing = requestedFacing
+        }
 
         cameraHandler.post { setupCamera() }
-
         return START_STICKY
     }
 
     private fun startForegroundService() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo al cliente")
+            .setContentText("Transmitiendo...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
@@ -163,10 +170,17 @@ class CameraService : Service() {
     }
 
     private fun setupCamera() {
+        synchronized(busyLock) { isCameraBusy = true }
+
         try {
+            safeCloseCamera() // Cerrar cualquier cámara anterior primero
+
             val cameraId = cameraManager!!.cameraIdList.find { id ->
                 cameraManager!!.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == cameraFacing
-            } ?: return
+            } ?: run {
+                onSetupFailed()
+                return
+            }
 
             currentCameraId = cameraId
             val characteristics = cameraManager!!.getCameraCharacteristics(cameraId)
@@ -174,18 +188,17 @@ class CameraService : Service() {
 
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 5)
 
-            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                    override fun onOpened(camera: CameraDevice) {
-                        cameraDevice = camera
-                        startCaptureSession()
-                    }
-                    override fun onDisconnected(camera: CameraDevice) { closeCurrentCamera() }
-                    override fun onError(camera: CameraDevice, error: Int) { closeCurrentCamera() }
-                }, cameraHandler)
-            }
+            cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+                    startCaptureSession()
+                }
+                override fun onDisconnected(camera: CameraDevice) { safeCloseCamera() }
+                override fun onError(camera: CameraDevice, error: Int) { safeCloseCamera() }
+            }, cameraHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error abriendo cámara", e)
+            Log.e(TAG, "Error en setupCamera", e)
+            onSetupFailed()
         }
     }
 
@@ -200,17 +213,26 @@ class CameraService : Service() {
             device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
-                    session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
-                    isStreaming.set(true)
-                    startImageAvailableListener()
-                    startReconnectLoop()
+                    try {
+                        session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
+                        isStreaming.set(true)
+                        startImageAvailableListener()
+                        startReconnectLoop()
+                        synchronized(busyLock) { isCameraBusy = false }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error al iniciar preview", e)
+                        safeCloseCamera()
+                    }
                 }
+
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e(TAG, "Fallo al configurar sesión de captura")
+                    Log.e(TAG, "Fallo en configuración de sesión")
+                    safeCloseCamera()
                 }
             }, cameraHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error creando sesión de captura", e)
+            Log.e(TAG, "Error creando CaptureSession", e)
+            safeCloseCamera()
         }
     }
 
@@ -222,9 +244,7 @@ class CameraService : Service() {
 
             try {
                 val jpegBytes = yuvImageToJpeg(image)
-                if (jpegBytes != null) {
-                    sendFrame(jpegBytes)
-                }
+                if (jpegBytes != null) sendFrame(jpegBytes)
             } catch (e: Exception) {
                 Log.e(TAG, "Error procesando frame", e)
             } finally {
@@ -250,16 +270,15 @@ class CameraService : Service() {
             val nv21 = ByteArray(ySize + uSize + vSize)
 
             yBuffer.get(nv21, 0, ySize)
-            vBuffer.get(nv21, ySize, vSize)           // V primero
-            uBuffer.get(nv21, ySize + vSize, uSize)   // U después
+            vBuffer.get(nv21, ySize, vSize)
+            uBuffer.get(nv21, ySize + vSize, uSize)
 
             val out = ByteArrayOutputStream(512 * 1024)
             val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
             yuvImage.compressToJpeg(Rect(0, 0, width, height), 78, out)
-
             return out.toByteArray()
         } catch (e: Exception) {
-            Log.e(TAG, "Error convirtiendo YUV a JPEG", e)
+            Log.e(TAG, "Error YUV→JPEG", e)
             return null
         }
     }
@@ -290,10 +309,7 @@ class CameraService : Service() {
                                 soTimeout = 10000
                             }
                             outStream = DataOutputStream(socket.getOutputStream())
-                            Log.i(TAG, "Conectado al cliente en $clientIp:$PORT")
-                        } catch (e: Exception) {
-                            // Intentará de nuevo
-                        }
+                        } catch (_: Exception) {}
                     }
                 }
                 Thread.sleep(4000)
@@ -301,6 +317,38 @@ class CameraService : Service() {
         }
     }
 
+    private fun safeCloseCamera() {
+        isStreaming.set(false)
+        imageReader?.setOnImageAvailableListener(null, null)
+        reconnectThread?.interrupt()
+
+        try { captureSession?.close() } catch (_: Exception) {}
+        try { cameraDevice?.close() } catch (_: Exception) {}
+        try { imageReader?.close() } catch (_: Exception) {}
+
+        synchronized(netLock) {
+            outStream?.close()
+            outStream = null
+        }
+
+        captureSession = null
+        cameraDevice = null
+        imageReader = null
+
+        synchronized(busyLock) { isCameraBusy = false }
+    }
+
+    private fun onSetupFailed() {
+        synchronized(busyLock) { isCameraBusy = false }
+        // Reintentar si hay cambio pendiente
+        val nextFacing = synchronized(busyLock) { pendingFacing?.also { pendingFacing = null } }
+        if (nextFacing != null) {
+            cameraFacing = nextFacing
+            cameraHandler.postDelayed({ setupCamera() }, 800)
+        }
+    }
+
+    // === MÉTODOS AUXILIARES ===
     private fun sendCameraAvailabilityToClient(available: Boolean) {
         thread {
             try {
@@ -308,7 +356,7 @@ class CameraService : Service() {
                     val cmd = if (available) "CAMERA_AVAILABLE:$cameraFacing" else "CAMERA_UNAVAILABLE:$cameraFacing"
                     socket.getOutputStream().write((cmd + "\n").toByteArray())
                 }
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
         }
     }
 
@@ -322,27 +370,8 @@ class CameraService : Service() {
         } catch (e: Exception) { false }
     }
 
-    private fun closeCurrentCamera() {
-        isStreaming.set(false)
-        imageReader?.setOnImageAvailableListener(null, null)
-        reconnectThread?.interrupt()
-
-        captureSession?.close()
-        cameraDevice?.close()
-        imageReader?.close()
-
-        synchronized(netLock) {
-            outStream?.close()
-            outStream = null
-        }
-
-        captureSession = null
-        cameraDevice = null
-        imageReader = null
-    }
-
     override fun onDestroy() {
-        closeCurrentCamera()
+        safeCloseCamera()
         cameraHandlerThread.quitSafely()
         super.onDestroy()
     }

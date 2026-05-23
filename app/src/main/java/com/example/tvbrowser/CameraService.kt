@@ -19,6 +19,9 @@ import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
 class CameraService : Service() {
@@ -36,6 +39,21 @@ class CameraService : Service() {
 
         @Volatile
         var latestFrameProvider: FrameProvider? = null
+
+        // === CIFRADO (Requerido por WebServerService) ===
+        private var cipher: Cipher? = null
+        private var secretKey: SecretKeySpec? = null
+
+        fun updateCipherKey(key: SecretKeySpec) {
+            secretKey = key
+            try {
+                cipher = Cipher.getInstance("AES/CTR/NoPadding")
+                val iv = ByteArray(16) { 0 }
+                cipher?.init(Cipher.ENCRYPT_MODE, key, IvParameterSpec(iv))
+            } catch (e: Exception) {
+                Log.e(TAG, "Error inicializando cifrado", e)
+            }
+        }
 
         internal val isStreaming = AtomicBoolean(false)
         @Volatile
@@ -68,22 +86,6 @@ class CameraService : Service() {
         fun getService(): CameraService = this@CameraService
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        cameraHandlerThread = HandlerThread("CameraThread").apply { start() }
-        cameraHandler = Handler(cameraHandlerThread.looper)
-
-        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cameraManager?.registerAvailabilityCallback(availabilityCallback, cameraHandler)
-
-        val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
-        clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
-
-        latestFrameProvider = object : FrameProvider {
-            override fun getLatestFrame(): ByteArray? = null // Opcional
-        }
-    }
-
     private val availabilityCallback = object : CameraManager.AvailabilityCallback() {
         override fun onCameraAvailable(cameraId: String) {
             if (isCameraWeCareAbout(cameraId)) {
@@ -103,6 +105,22 @@ class CameraService : Service() {
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        cameraHandlerThread = HandlerThread("CameraThread").apply { start() }
+        cameraHandler = Handler(cameraHandlerThread.looper)
+
+        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        cameraManager?.registerAvailabilityCallback(availabilityCallback, cameraHandler)
+
+        val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
+        clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
+
+        latestFrameProvider = object : FrameProvider {
+            override fun getLatestFrame(): ByteArray? = null
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -115,8 +133,8 @@ class CameraService : Service() {
         startForegroundService()
 
         val requestedFacing = intent?.getIntExtra("FACING", CameraCharacteristics.LENS_FACING_BACK) ?: CameraCharacteristics.LENS_FACING_BACK
-
         cameraFacing = requestedFacing
+
         cameraHandler.post { setupCamera() }
 
         return START_STICKY
@@ -125,7 +143,7 @@ class CameraService : Service() {
     private fun startForegroundService() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo...")
+            .setContentText("Transmitiendo al cliente")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
@@ -151,21 +169,21 @@ class CameraService : Service() {
             } ?: return
 
             currentCameraId = cameraId
-
-            // Orientación del sensor (importante en Redmi)
             val characteristics = cameraManager!!.getCameraCharacteristics(cameraId)
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
 
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 5)
 
-            cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                override fun onOpened(camera: CameraDevice) {
-                    cameraDevice = camera
-                    startCaptureSession()
-                }
-                override fun onDisconnected(camera: CameraDevice) { closeCurrentCamera() }
-                override fun onError(camera: CameraDevice, error: Int) { closeCurrentCamera() }
-            }, cameraHandler)
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                    override fun onOpened(camera: CameraDevice) {
+                        cameraDevice = camera
+                        startCaptureSession()
+                    }
+                    override fun onDisconnected(camera: CameraDevice) { closeCurrentCamera() }
+                    override fun onError(camera: CameraDevice, error: Int) { closeCurrentCamera() }
+                }, cameraHandler)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error abriendo cámara", e)
         }
@@ -187,10 +205,12 @@ class CameraService : Service() {
                     startImageAvailableListener()
                     startReconnectLoop()
                 }
-                override fun onConfigureFailed(session: CameraCaptureSession) {}
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e(TAG, "Fallo al configurar sesión de captura")
+                }
             }, cameraHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error creando sesión", e)
+            Log.e(TAG, "Error creando sesión de captura", e)
         }
     }
 
@@ -239,7 +259,7 @@ class CameraService : Service() {
 
             return out.toByteArray()
         } catch (e: Exception) {
-            Log.e(TAG, "Error YUV to JPEG", e)
+            Log.e(TAG, "Error convirtiendo YUV a JPEG", e)
             return null
         }
     }
@@ -270,9 +290,9 @@ class CameraService : Service() {
                                 soTimeout = 10000
                             }
                             outStream = DataOutputStream(socket.getOutputStream())
-                            Log.i(TAG, "Conectado al cliente: $clientIp")
+                            Log.i(TAG, "Conectado al cliente en $clientIp:$PORT")
                         } catch (e: Exception) {
-                            // Log silencioso
+                            // Intentará de nuevo
                         }
                     }
                 }

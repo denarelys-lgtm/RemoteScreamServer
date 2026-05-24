@@ -5,18 +5,18 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
-import android.hardware.Camera
 import android.os.*
 import android.util.Log
-import android.view.SurfaceView
+import android.util.Size
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.Socket
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
@@ -36,27 +36,27 @@ class CameraService : Service() {
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
-        fun updateCipherKey(key: SecretKeySpec) {
-            // Compatibilidad con WebServerService
-        }
-
-        internal val isStreaming = AtomicBoolean(false)
-        @Volatile
-        internal var isCameraAvailable = true
+        fun updateCipherKey(key: SecretKeySpec) {}
     }
 
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private var camera: Camera? = null
-    private var currentFacing = Camera.CameraInfo.CAMERA_FACING_BACK
 
     private val netLock = Object()
     private var outStream: DataOutputStream? = null
     private var reconnectThread: Thread? = null
 
+    private var currentFacing = CameraSelector.LENS_FACING_BACK
     private var clientIp = "127.0.0.1"
+    private val isStreaming = AtomicBoolean(false)
+
+    private lateinit var cameraExecutor: ExecutorService
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
         val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
         clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
@@ -76,10 +76,10 @@ class CameraService : Service() {
 
         startForegroundServiceSafely()
 
-        val facing = intent?.getIntExtra("FACING", Camera.CameraInfo.CAMERA_FACING_BACK) ?: Camera.CameraInfo.CAMERA_FACING_BACK
+        val facing = intent?.getIntExtra("FACING", CameraSelector.LENS_FACING_BACK) ?: CameraSelector.LENS_FACING_BACK
         currentFacing = facing
 
-        Handler(Looper.getMainLooper()).post { startCamera() }
+        Handler(Looper.getMainLooper()).post { startCameraX() }
 
         return START_STICKY
     }
@@ -92,11 +92,7 @@ class CameraService : Service() {
             .setOngoing(true)
             .build()
 
-        try {
-            startForeground(NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error foreground", e)
-        }
+        startForeground(NOTIFICATION_ID, notification)
     }
 
     private fun createNotificationChannel() {
@@ -106,58 +102,56 @@ class CameraService : Service() {
         }
     }
 
-    private fun startCamera() {
-        try {
-            releaseCamera()
+    private fun startCameraX() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
-            val cameraId = getCameraId(currentFacing)
-            camera = Camera.open(cameraId)
+        cameraProviderFuture.addListener({
+            try {
+                cameraProvider = cameraProviderFuture.get()
 
-            val parameters = camera?.parameters
-            parameters?.setPreviewSize(640, 480)
-            parameters?.previewFormat = ImageFormat.NV21
-            camera?.parameters = parameters
+                val selector = CameraSelector.Builder().requireLensFacing(currentFacing).build()
 
-            camera?.setPreviewCallback { data, cam ->
-                if (data != null) processFrame(data, cam)
+                imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(640, 480))
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+
+                imageAnalysis?.setAnalyzer(cameraExecutor) { image ->
+                    processImage(image)
+                    image.close()
+                }
+
+                cameraProvider?.unbindAll()
+                camera = cameraProvider?.bindToLifecycle(
+                    this as? androidx.lifecycle.LifecycleOwner ?: return@addListener,
+                    selector,
+                    imageAnalysis
+                )
+
+                isStreaming.set(true)
+                sendCameraAvailabilityToClient(true)
+                startReconnectLoop()
+
+                Log.i(TAG, "CameraX iniciada correctamente - Cámara ${if (currentFacing == CameraSelector.LENS_FACING_BACK) "trasera" else "frontal"}")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error al iniciar CameraX", e)
+                sendCameraAvailabilityToClient(false)
             }
-
-            val dummySurface = SurfaceView(this)
-            camera?.setPreviewDisplay(dummySurface.holder)
-            camera?.startPreview()
-
-            isStreaming.set(true)
-            sendCameraAvailabilityToClient(true)
-            startReconnectLoop()
-
-            Log.i(TAG, "Cámara ${if (currentFacing == Camera.CameraInfo.CAMERA_FACING_BACK) "trasera" else "frontal"} iniciada")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error al iniciar cámara", e)
-            sendCameraAvailabilityToClient(false)
-        }
+        }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun getCameraId(facing: Int): Int {
-        val info = Camera.CameraInfo()
-        for (i in 0 until Camera.getNumberOfCameras()) {
-            Camera.getCameraInfo(i, info)
-            if (info.facing == facing) return i
-        }
-        return 0
-    }
-
-    private fun processFrame(data: ByteArray, cam: Camera) {
+    private fun processImage(image: ImageProxy) {
         try {
-            val params = cam.parameters
-            val width = params.previewSize.width
-            val height = params.previewSize.height
+            val buffer = image.planes[0].buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
 
-            val yuvImage = YuvImage(data, ImageFormat.NV21, width, height, null)
-            val baos = ByteArrayOutputStream()
-            yuvImage.compressToJpeg(Rect(0, 0, width, height), 75, baos)
+            val yuvImage = YuvImage(bytes, ImageFormat.NV21, image.width, image.height, null)
+            val out = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 75, out)
 
-            sendFrame(baos.toByteArray())
+            sendFrame(out.toByteArray())
         } catch (e: Exception) {}
     }
 
@@ -203,19 +197,11 @@ class CameraService : Service() {
         }
     }
 
-    private fun releaseCamera() {
-        isStreaming.set(false)
-        try {
-            camera?.setPreviewCallback(null)
-            camera?.stopPreview()
-            camera?.release()
-        } catch (_: Exception) {}
-        camera = null
-    }
-
     override fun onDestroy() {
-        releaseCamera()
+        isStreaming.set(false)
         reconnectThread?.interrupt()
+        cameraProvider?.unbindAll()
+        cameraExecutor.shutdown()
         synchronized(netLock) {
             outStream?.close()
             outStream = null

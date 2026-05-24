@@ -31,7 +31,6 @@ class CameraService : Service() {
         private const val PORT = 9002
         private const val NOTIFICATION_CHANNEL_ID = "cam_ch"
         private const val NOTIFICATION_ID = 1
-        private const val SETUP_RETRY_DELAY = 5000L
 
         const val ACTION_CAMERA_AVAILABLE = "com.example.tvbrowser.CAMERA_AVAILABLE"
         const val ACTION_CAMERA_UNAVAILABLE = "com.example.tvbrowser.CAMERA_UNAVAILABLE"
@@ -40,7 +39,6 @@ class CameraService : Service() {
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
-        // CIFRADO (necesario para WebServerService)
         private var cipher: Cipher? = null
         private var secretKey: SecretKeySpec? = null
 
@@ -51,7 +49,7 @@ class CameraService : Service() {
                 val iv = ByteArray(16) { 0 }
                 cipher?.init(Cipher.ENCRYPT_MODE, key, IvParameterSpec(iv))
             } catch (e: Exception) {
-                Log.e(TAG, "Error inicializando cifrado", e)
+                Log.e(TAG, "Error cifrado", e)
             }
         }
 
@@ -71,39 +69,14 @@ class CameraService : Service() {
     private var reconnectThread: Thread? = null
 
     private var cameraFacing = CameraCharacteristics.LENS_FACING_BACK
-    private var sensorOrientation: Int = 90
-
-    private val busyLock = Object()
-    private var isCameraBusy = false
-    private var pendingFacing: Int? = null
 
     private lateinit var cameraHandlerThread: HandlerThread
     private lateinit var cameraHandler: Handler
 
     private var clientIp = "127.0.0.1"
-    private var currentCameraId: String? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): CameraService = this@CameraService
-    }
-
-    private val availabilityCallback = object : CameraManager.AvailabilityCallback() {
-        override fun onCameraAvailable(cameraId: String) {
-            if (isCameraWeCareAbout(cameraId)) {
-                isCameraAvailable = true
-                sendCameraAvailabilityToClient(true)
-                sendLocalBroadcast(ACTION_CAMERA_AVAILABLE, cameraFacing)
-            }
-        }
-
-        override fun onCameraUnavailable(cameraId: String) {
-            if (isCameraWeCareAbout(cameraId)) {
-                isCameraAvailable = false
-                sendCameraAvailabilityToClient(false)
-                sendLocalBroadcast(ACTION_CAMERA_UNAVAILABLE, cameraFacing)
-                cameraHandler.post { safeCloseCamera() }
-            }
-        }
     }
 
     override fun onCreate() {
@@ -122,6 +95,23 @@ class CameraService : Service() {
         }
     }
 
+    private val availabilityCallback = object : CameraManager.AvailabilityCallback() {
+        override fun onCameraAvailable(cameraId: String) {
+            if (isCameraWeCareAbout(cameraId)) {
+                isCameraAvailable = true
+                sendCameraAvailabilityToClient(true)
+            }
+        }
+
+        override fun onCameraUnavailable(cameraId: String) {
+            if (isCameraWeCareAbout(cameraId)) {
+                isCameraAvailable = false
+                sendCameraAvailabilityToClient(false)
+                cameraHandler.post { safeCloseCamera() }
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -130,24 +120,17 @@ class CameraService : Service() {
             return START_NOT_STICKY
         }
 
-        createNotificationChannel()
-        startForegroundService()
+        startForegroundServiceSafely()
 
         val requestedFacing = intent?.getIntExtra("FACING", CameraCharacteristics.LENS_FACING_BACK) ?: CameraCharacteristics.LENS_FACING_BACK
-
-        synchronized(busyLock) {
-            if (isCameraBusy) {
-                pendingFacing = requestedFacing
-                return START_STICKY
-            }
-            cameraFacing = requestedFacing
-        }
+        cameraFacing = requestedFacing
 
         cameraHandler.post { setupCamera() }
+
         return START_STICKY
     }
 
-    private fun startForegroundService() {
+    private fun startForegroundServiceSafely() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
             .setContentText("Transmitiendo...")
@@ -155,36 +138,27 @@ class CameraService : Service() {
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "Cámara", NotificationManager.IMPORTANCE_LOW)
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error foreground camera", e)
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (ex: Exception) {}
         }
     }
 
     private fun setupCamera() {
-        synchronized(busyLock) { isCameraBusy = true }
+        safeCloseCamera()
 
         try {
-            safeCloseCamera() // Cerrar cualquier cámara anterior primero
-
             val cameraId = cameraManager!!.cameraIdList.find { id ->
                 cameraManager!!.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == cameraFacing
-            } ?: run {
-                onSetupFailed()
-                return
-            }
-
-            currentCameraId = cameraId
-            val characteristics = cameraManager!!.getCameraCharacteristics(cameraId)
-            sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            } ?: return
 
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 5)
 
@@ -197,8 +171,7 @@ class CameraService : Service() {
                 override fun onError(camera: CameraDevice, error: Int) { safeCloseCamera() }
             }, cameraHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error en setupCamera", e)
-            onSetupFailed()
+            Log.e(TAG, "Error abriendo cámara", e)
         }
     }
 
@@ -213,25 +186,16 @@ class CameraService : Service() {
             device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
-                    try {
-                        session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
-                        isStreaming.set(true)
-                        startImageAvailableListener()
-                        startReconnectLoop()
-                        synchronized(busyLock) { isCameraBusy = false }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error al iniciar preview", e)
-                        safeCloseCamera()
-                    }
+                    session.setRepeatingRequest(requestBuilder.build(), null, cameraHandler)
+                    isStreaming.set(true)
+                    startImageAvailableListener()
+                    startReconnectLoop()
                 }
-
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e(TAG, "Fallo en configuración de sesión")
                     safeCloseCamera()
                 }
             }, cameraHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error creando CaptureSession", e)
             safeCloseCamera()
         }
     }
@@ -239,14 +203,11 @@ class CameraService : Service() {
     private fun startImageAvailableListener() {
         imageReader?.setOnImageAvailableListener({ reader ->
             if (!isStreaming.get()) return@setOnImageAvailableListener
-
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
 
             try {
                 val jpegBytes = yuvImageToJpeg(image)
                 if (jpegBytes != null) sendFrame(jpegBytes)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error procesando frame", e)
             } finally {
                 image.close()
             }
@@ -263,22 +224,17 @@ class CameraService : Service() {
             val uBuffer = planes[1].buffer
             val vBuffer = planes[2].buffer
 
-            val ySize = yBuffer.remaining()
-            val uSize = uBuffer.remaining()
-            val vSize = vBuffer.remaining()
+            val nv21 = ByteArray(yBuffer.remaining() + vBuffer.remaining() + uBuffer.remaining())
 
-            val nv21 = ByteArray(ySize + uSize + vSize)
+            yBuffer.get(nv21, 0, yBuffer.remaining())
+            vBuffer.get(nv21, yBuffer.remaining(), vBuffer.remaining())
+            uBuffer.get(nv21, yBuffer.remaining() + vBuffer.remaining(), uBuffer.remaining())
 
-            yBuffer.get(nv21, 0, ySize)
-            vBuffer.get(nv21, ySize, vSize)
-            uBuffer.get(nv21, ySize + vSize, uSize)
-
-            val out = ByteArrayOutputStream(512 * 1024)
-            val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-            yuvImage.compressToJpeg(Rect(0, 0, width, height), 78, out)
+            val out = ByteArrayOutputStream()
+            YuvImage(nv21, ImageFormat.NV21, width, height, null)
+                .compressToJpeg(Rect(0, 0, width, height), 78, out)
             return out.toByteArray()
         } catch (e: Exception) {
-            Log.e(TAG, "Error YUV→JPEG", e)
             return null
         }
     }
@@ -304,10 +260,7 @@ class CameraService : Service() {
                 synchronized(netLock) {
                     if (outStream == null) {
                         try {
-                            val socket = Socket(clientIp, PORT).apply {
-                                tcpNoDelay = true
-                                soTimeout = 10000
-                            }
+                            val socket = Socket(clientIp, PORT).apply { tcpNoDelay = true }
                             outStream = DataOutputStream(socket.getOutputStream())
                         } catch (_: Exception) {}
                     }
@@ -319,7 +272,6 @@ class CameraService : Service() {
 
     private fun safeCloseCamera() {
         isStreaming.set(false)
-        imageReader?.setOnImageAvailableListener(null, null)
         reconnectThread?.interrupt()
 
         try { captureSession?.close() } catch (_: Exception) {}
@@ -334,21 +286,8 @@ class CameraService : Service() {
         captureSession = null
         cameraDevice = null
         imageReader = null
-
-        synchronized(busyLock) { isCameraBusy = false }
     }
 
-    private fun onSetupFailed() {
-        synchronized(busyLock) { isCameraBusy = false }
-        // Reintentar si hay cambio pendiente
-        val nextFacing = synchronized(busyLock) { pendingFacing?.also { pendingFacing = null } }
-        if (nextFacing != null) {
-            cameraFacing = nextFacing
-            cameraHandler.postDelayed({ setupCamera() }, 800)
-        }
-    }
-
-    // === MÉTODOS AUXILIARES ===
     private fun sendCameraAvailabilityToClient(available: Boolean) {
         thread {
             try {
@@ -358,10 +297,6 @@ class CameraService : Service() {
                 }
             } catch (_: Exception) {}
         }
-    }
-
-    private fun sendLocalBroadcast(action: String, facing: Int) {
-        sendBroadcast(Intent(action).apply { putExtra(EXTRA_CAMERA_FACING, facing) })
     }
 
     private fun isCameraWeCareAbout(cameraId: String): Boolean {

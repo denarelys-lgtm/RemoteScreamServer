@@ -39,6 +39,11 @@ class CameraService : Service() {
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
+        // Compatibilidad con WebServerService
+        internal val isStreaming = AtomicBoolean(false)
+        @Volatile
+        internal var isCameraAvailable = true
+
         fun updateCipherKey(key: SecretKeySpec) {}
     }
 
@@ -52,7 +57,6 @@ class CameraService : Service() {
 
     private var currentFacing = CameraSelector.LENS_FACING_BACK
     private var clientIp = "127.0.0.1"
-    private val isStreaming = AtomicBoolean(false)
 
     private lateinit var cameraExecutor: ExecutorService
 
@@ -132,13 +136,15 @@ class CameraService : Service() {
                 )
 
                 isStreaming.set(true)
+                isCameraAvailable = true
                 sendCameraAvailabilityToClient(true)
                 startReconnectLoop()
 
                 Log.i(TAG, "CameraX iniciada correctamente")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error al iniciar CameraX", e)
+                Log.e(TAG, "Error iniciando CameraX", e)
+                isCameraAvailable = false
                 sendCameraAvailabilityToClient(false)
             }
         }, ContextCompat.getMainExecutor(this))

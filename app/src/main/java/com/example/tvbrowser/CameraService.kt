@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.*
 import android.util.Log
 import android.util.Size
@@ -132,7 +135,7 @@ class CameraService : Service() {
                 sendCameraAvailabilityToClient(true)
                 startReconnectLoop()
 
-                Log.i(TAG, "CameraX iniciada correctamente - Cámara ${if (currentFacing == CameraSelector.LENS_FACING_BACK) "trasera" else "frontal"}")
+                Log.i(TAG, "CameraX iniciada correctamente")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error al iniciar CameraX", e)

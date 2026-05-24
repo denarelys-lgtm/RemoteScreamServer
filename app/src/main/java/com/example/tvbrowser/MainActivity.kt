@@ -240,10 +240,15 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("last_camera_facing").apply()
     }
 
+    // 💡 CORREGIDO: Evita iniciar el FGS si el usuario retiró los permisos manualmente desde los ajustes.
     private fun restoreLastCamera() {
         val lastFacing = prefs.getInt("last_camera_facing", -1)
         if (lastFacing != -1) {
-            startCameraWithPermissionCheck(lastFacing)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                startCameraService(lastFacing)
+            } else {
+                prefs.edit().remove("last_camera_facing").apply()
+            }
         }
     }
 

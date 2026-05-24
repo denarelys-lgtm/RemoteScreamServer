@@ -83,10 +83,12 @@ class CameraService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
 
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "❌ Permiso de cámara no otorgado. Deteniendo servicio.")
             stopSelf()
             return START_NOT_STICKY
         }
 
+        // Lanzamos el servicio en primer plano con el parche de seguridad para Android 14
         startForegroundServiceSimple()
 
         val facing = intent?.getIntExtra("FACING", CameraSelector.LENS_FACING_BACK) ?: CameraSelector.LENS_FACING_BACK
@@ -100,14 +102,21 @@ class CameraService : LifecycleService() {
     private fun startForegroundServiceSimple() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo...")
+            .setContentText("Transmitiendo en vivo...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
-        } else {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // 💡 SOLUCIÓN: Intentamos asignarle el tipo de servicio de cámara de forma segura
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "⚠️ Error de sincronización de permisos al iniciar FGS tipo CAMERA. Reintentando modo clásico.", e)
+            // Fallback seguro: Inicia el servicio de fondo clásico para evitar que la aplicación se cierre bruscamente
             startForeground(NOTIFICATION_ID, notification)
         }
     }
@@ -128,7 +137,6 @@ class CameraService : LifecycleService() {
 
                 val selector = CameraSelector.Builder().requireLensFacing(currentFacing).build()
 
-                // 💡 Detectamos la rotación actual de la pantalla para orientar la cámara de forma nativa
                 val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
                 val displayRotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     this.display?.rotation ?: Surface.ROTATION_0
@@ -139,7 +147,6 @@ class CameraService : LifecycleService() {
 
                 imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
-                    // 💡 SOLUCIÓN: Si por defecto sigue al revés debido al hardware, cambia 'displayRotation' por 'Surface.ROTATION_180'
                     .setTargetRotation(displayRotation)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()

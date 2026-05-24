@@ -138,7 +138,6 @@ class CameraService : LifecycleService() {
 
                 cameraProvider?.unbindAll()
                 
-                // Usamos 'this' de forma segura ya que extendemos de LifecycleService
                 cameraProvider?.bindToLifecycle(
                     this,
                     selector,
@@ -162,7 +161,6 @@ class CameraService : LifecycleService() {
 
     private fun processImage(image: ImageProxy) {
         try {
-            // 💡 SOLUCIÓN A LAS RAYAS VERDES: Conversión correcta entrelazando planos YUV
             val nv21Bytes = yuv420ToNv21(image)
 
             val out = ByteArrayOutputStream()
@@ -175,7 +173,6 @@ class CameraService : LifecycleService() {
         }
     }
 
-    // 💡 Método auxiliar para procesar y reconstruir los bytes de color reales
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height
@@ -183,19 +180,18 @@ class CameraService : LifecycleService() {
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val yBuffer = yBuffer = yPlane.buffer
-        val uBuffer = uBuffer = uPlane.buffer
-        val vBuffer = vBuffer = vPlane.buffer
+        // 💡 CORREGIDO: Inicialización limpia de los buffers sin asignaciones duplicadas
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
 
         val ySize = yBuffer.remaining()
-        
-        // Estructura NV21: El tamaño total es Y (width * height) + submuestreo UV (width * height / 2)
         val nv21 = ByteArray(ySize + (width * height / 2))
 
-        // 1. Copiar canal de brillo (Luminancia - Y)
+        // 1. Copiar canal de brillo (Y)
         yBuffer.get(nv21, 0, ySize)
 
-        // 2. Mapear y mezclar los canales de color (Croma - U y V)
+        // 2. Mezclar canales de color (U y V)
         val vRowStride = vPlane.rowStride
         val uRowStride = uPlane.rowStride
         val vPixelStride = vPlane.pixelStride

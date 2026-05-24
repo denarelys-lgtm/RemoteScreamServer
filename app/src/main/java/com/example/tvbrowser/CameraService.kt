@@ -15,7 +15,7 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.LifecycleService // 💡 IMPORTANTE: Asegúrate de importar esto
+import androidx.lifecycle.LifecycleService
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.Socket
@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
-// 💡 Cambiamos de 'Service()' a 'LifecycleService()' para que CameraX tenga un ciclo de vida válido
 class CameraService : LifecycleService() {
 
     companion object {
@@ -61,7 +60,7 @@ class CameraService : LifecycleService() {
     private lateinit var cameraExecutor: ExecutorService
 
     override fun onCreate() {
-        super.onCreate() // LifecycleService maneja internamente su ciclo aquí
+        super.onCreate()
         createNotificationChannel()
         cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -74,12 +73,11 @@ class CameraService : LifecycleService() {
     }
 
     override fun onBind(intent: Intent): IBinder? {
-        super.onBind(intent) // Obligatorio llamarlo en LifecycleService
+        super.onBind(intent)
         return null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Primero llamamos al super para inicializar el estado del ciclo de vida
         super.onStartCommand(intent, flags, startId)
 
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -105,7 +103,6 @@ class CameraService : LifecycleService() {
             .setOngoing(true)
             .build()
 
-        // 💡 SOLUCIÓN CRÍTICA: Se añade el parámetro del tipo de servicio para Android 14 (API 34)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
         } else {
@@ -141,7 +138,7 @@ class CameraService : LifecycleService() {
 
                 cameraProvider?.unbindAll()
                 
-                // 💡 SOLUCIÓN: Ahora 'this' es un LifecycleOwner válido gracias a LifecycleService
+                // Usamos 'this' de forma segura ya que extendemos de LifecycleService
                 cameraProvider?.bindToLifecycle(
                     this,
                     selector,
@@ -165,16 +162,66 @@ class CameraService : LifecycleService() {
 
     private fun processImage(image: ImageProxy) {
         try {
-            val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining())
-            buffer.get(bytes)
+            // 💡 SOLUCIÓN A LAS RAYAS VERDES: Conversión correcta entrelazando planos YUV
+            val nv21Bytes = yuv420ToNv21(image)
 
-            val yuvImage = YuvImage(bytes, ImageFormat.NV21, image.width, image.height, null)
             val out = ByteArrayOutputStream()
+            val yuvImage = YuvImage(nv21Bytes, ImageFormat.NV21, image.width, image.height, null)
             yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 75, out)
 
             sendFrame(out.toByteArray())
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando el frame de la cámara", e)
+        }
+    }
+
+    // 💡 Método auxiliar para procesar y reconstruir los bytes de color reales
+    private fun yuv420ToNv21(image: ImageProxy): ByteArray {
+        val width = image.width
+        val height = image.height
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val yBuffer = yBuffer = yPlane.buffer
+        val uBuffer = uBuffer = uPlane.buffer
+        val vBuffer = vBuffer = vPlane.buffer
+
+        val ySize = yBuffer.remaining()
+        
+        // Estructura NV21: El tamaño total es Y (width * height) + submuestreo UV (width * height / 2)
+        val nv21 = ByteArray(ySize + (width * height / 2))
+
+        // 1. Copiar canal de brillo (Luminancia - Y)
+        yBuffer.get(nv21, 0, ySize)
+
+        // 2. Mapear y mezclar los canales de color (Croma - U y V)
+        val vRowStride = vPlane.rowStride
+        val uRowStride = uPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
+        val uPixelStride = uPlane.pixelStride
+
+        var chromaOffset = ySize
+        val chromaWidth = width / 2
+        val chromaHeight = height / 2
+
+        val vRow = ByteArray(vRowStride)
+        val uRow = ByteArray(uRowStride)
+
+        for (row in 0 until chromaHeight) {
+            vBuffer.position(row * vRowStride)
+            vBuffer.get(vRow, 0, Math.min(vRowStride, vBuffer.remaining()))
+
+            uBuffer.position(row * uRowStride)
+            uBuffer.get(uRow, 0, Math.min(uRowStride, uBuffer.remaining()))
+
+            for (col in 0 until chromaWidth) {
+                nv21[chromaOffset++] = vRow[col * vPixelStride]
+                nv21[chromaOffset++] = uRow[col * uPixelStride]
+            }
+        }
+
+        return nv21
     }
 
     private fun sendFrame(bytes: ByteArray) {
@@ -228,6 +275,6 @@ class CameraService : LifecycleService() {
             outStream?.close()
             outStream = null
         }
-        super.onDestroy() // LifecycleService limpiará los observadores automáticamente
+        super.onDestroy()
     }
 }

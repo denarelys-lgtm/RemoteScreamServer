@@ -39,7 +39,6 @@ class CameraService : Service() {
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
-        // Compatibilidad con WebServerService
         internal val isStreaming = AtomicBoolean(false)
         @Volatile
         internal var isCameraAvailable = true
@@ -49,7 +48,6 @@ class CameraService : Service() {
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
-    private var camera: Camera? = null
 
     private val netLock = Object()
     private var outStream: DataOutputStream? = null
@@ -81,7 +79,7 @@ class CameraService : Service() {
             return START_NOT_STICKY
         }
 
-        startForegroundServiceSafely()
+        startForegroundServiceSimple()
 
         val facing = intent?.getIntExtra("FACING", CameraSelector.LENS_FACING_BACK) ?: CameraSelector.LENS_FACING_BACK
         currentFacing = facing
@@ -91,7 +89,7 @@ class CameraService : Service() {
         return START_STICKY
     }
 
-    private fun startForegroundServiceSafely() {
+    private fun startForegroundServiceSimple() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
             .setContentText("Transmitiendo...")
@@ -99,7 +97,7 @@ class CameraService : Service() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(NOTIFICATION_ID, notification)   // Sin tipo específico
     }
 
     private fun createNotificationChannel() {
@@ -129,7 +127,7 @@ class CameraService : Service() {
                 }
 
                 cameraProvider?.unbindAll()
-                camera = cameraProvider?.bindToLifecycle(
+                cameraProvider?.bindToLifecycle(
                     this as? androidx.lifecycle.LifecycleOwner ?: return@addListener,
                     selector,
                     imageAnalysis
@@ -140,10 +138,10 @@ class CameraService : Service() {
                 sendCameraAvailabilityToClient(true)
                 startReconnectLoop()
 
-                Log.i(TAG, "CameraX iniciada correctamente")
+                Log.i(TAG, "✅ CameraX iniciada correctamente!")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error iniciando CameraX", e)
+                Log.e(TAG, "❌ Error al iniciar CameraX", e)
                 isCameraAvailable = false
                 sendCameraAvailabilityToClient(false)
             }

@@ -11,6 +11,7 @@ import android.graphics.YuvImage
 import android.hardware.Camera
 import android.os.*
 import android.util.Log
+import android.view.SurfaceView
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -35,7 +36,7 @@ class CameraService : Service() {
         var latestFrameProvider: FrameProvider? = null
 
         fun updateCipherKey(key: SecretKeySpec) {
-            // Mantener compatibilidad con WebServerService
+            // Compatibilidad con WebServerService
         }
 
         internal val isStreaming = AtomicBoolean(false)
@@ -72,20 +73,20 @@ class CameraService : Service() {
             return START_NOT_STICKY
         }
 
-        startForegroundSafely()
+        startForegroundServiceSafely()
 
-        val requestedFacing = intent?.getIntExtra("FACING", Camera.CameraInfo.CAMERA_FACING_BACK) ?: Camera.CameraInfo.CAMERA_FACING_BACK
-        currentFacing = requestedFacing
+        val facing = intent?.getIntExtra("FACING", Camera.CameraInfo.CAMERA_FACING_BACK) ?: Camera.CameraInfo.CAMERA_FACING_BACK
+        currentFacing = facing
 
-        Handler(Looper.getMainLooper()).post { startCameraPreview() }
+        Handler(Looper.getMainLooper()).post { startCamera() }
 
         return START_STICKY
     }
 
-    private fun startForegroundSafely() {
+    private fun startForegroundServiceSafely() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo al cliente")
+            .setContentText("Transmitiendo...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
@@ -104,23 +105,22 @@ class CameraService : Service() {
         }
     }
 
-    private fun startCameraPreview() {
+    private fun startCamera() {
         try {
             releaseCamera()
 
             val cameraId = getCameraId(currentFacing)
             camera = Camera.open(cameraId)
 
-            val params = camera?.parameters
-            params?.setPreviewSize(640, 480)
-            params?.previewFormat = ImageFormat.NV21
-            camera?.parameters = params
+            val parameters = camera?.parameters
+            parameters?.setPreviewSize(640, 480)
+            parameters?.previewFormat = ImageFormat.NV21
+            camera?.parameters = parameters
 
             camera?.setPreviewCallback { data, cam ->
                 if (data != null) processFrame(data, cam)
             }
 
-            // Surface ficticia (necesaria para que funcione)
             val dummySurface = SurfaceView(this)
             camera?.setPreviewDisplay(dummySurface.holder)
             camera?.startPreview()
@@ -132,7 +132,7 @@ class CameraService : Service() {
             Log.i(TAG, "Cámara ${if (currentFacing == Camera.CameraInfo.CAMERA_FACING_BACK) "trasera" else "frontal"} iniciada")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error iniciando cámara", e)
+            Log.e(TAG, "Error al iniciar cámara", e)
             sendCameraAvailabilityToClient(false)
         }
     }
@@ -153,10 +153,10 @@ class CameraService : Service() {
             val height = params.previewSize.height
 
             val yuvImage = YuvImage(data, ImageFormat.NV21, width, height, null)
-            val out = ByteArrayOutputStream()
-            yuvImage.compressToJpeg(Rect(0, 0, width, height), 75, out)
+            val baos = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, width, height), 75, baos)
 
-            sendFrame(out.toByteArray())
+            sendFrame(baos.toByteArray())
         } catch (e: Exception) {}
     }
 

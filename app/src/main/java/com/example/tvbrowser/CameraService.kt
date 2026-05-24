@@ -81,6 +81,8 @@ class CameraService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()   // ← Muy importante
+
         cameraHandlerThread = HandlerThread("CameraThread").apply { start() }
         cameraHandler = Handler(cameraHandlerThread.looper)
 
@@ -133,9 +135,10 @@ class CameraService : Service() {
     private fun startForegroundServiceSafely() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo...")
+            .setContentText("Transmitiendo al cliente...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
         try {
@@ -145,10 +148,21 @@ class CameraService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error foreground camera", e)
-            try {
-                startForeground(NOTIFICATION_ID, notification)
-            } catch (ex: Exception) {}
+            Log.e(TAG, "Error al iniciar foreground service", e)
+        }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Cámara",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Canal para servicio de cámara"
+                setShowBadge(false)
+            }
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
         }
     }
 

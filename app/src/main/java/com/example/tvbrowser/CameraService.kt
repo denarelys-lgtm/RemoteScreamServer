@@ -161,6 +161,7 @@ class CameraService : LifecycleService() {
 
     private fun processImage(image: ImageProxy) {
         try {
+            // Conversión correcta reconstruyendo los planos YUV desalineados
             val nv21Bytes = yuv420ToNv21(image)
 
             val out = ByteArrayOutputStream()
@@ -176,44 +177,59 @@ class CameraService : LifecycleService() {
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height
+        
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        // 💡 CORREGIDO: Inicialización limpia de los buffers sin asignaciones duplicadas
         val yBuffer = yPlane.buffer
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
-        val ySize = yBuffer.remaining()
-        val nv21 = ByteArray(ySize + (width * height / 2))
+        val nv21 = ByteArray(width * height * 3 / 2)
 
-        // 1. Copiar canal de brillo (Y)
-        yBuffer.get(nv21, 0, ySize)
+        // 1. Copiar el plano Y fila por fila saltando el relleno extra (Row Stride) de memoria
+        val yRowStride = yPlane.rowStride
+        var nv21YOffset = 0
+        if (yRowStride == width) {
+            yBuffer.get(nv21, 0, width * height)
+        } else {
+            for (row in 0 until height) {
+                yBuffer.position(row * yRowStride)
+                yBuffer.get(nv21, nv21YOffset, width)
+                nv21YOffset += width
+            }
+        }
 
-        // 2. Mezclar canales de color (U y V)
+        // 2. Extraer y entrelazar de forma segura los planos de croma V y U
         val vRowStride = vPlane.rowStride
-        val uRowStride = uPlane.rowStride
         val vPixelStride = vPlane.pixelStride
-        val uPixelStride = uPlane.pixelStride
-
-        var chromaOffset = ySize
-        val chromaWidth = width / 2
+        
+        var chromaOffset = width * height
         val chromaHeight = height / 2
+        val chromaWidth = width / 2
 
         val vRow = ByteArray(vRowStride)
-        val uRow = ByteArray(uRowStride)
 
         for (row in 0 until chromaHeight) {
             vBuffer.position(row * vRowStride)
-            vBuffer.get(vRow, 0, Math.min(vRowStride, vBuffer.remaining()))
-
-            uBuffer.position(row * uRowStride)
-            uBuffer.get(uRow, 0, Math.min(uRowStride, uBuffer.remaining()))
+            val bytesToRead = Math.min(vRowStride, vBuffer.remaining())
+            vBuffer.get(vRow, 0, bytesToRead)
 
             for (col in 0 until chromaWidth) {
-                nv21[chromaOffset++] = vRow[col * vPixelStride]
-                nv21[chromaOffset++] = uRow[col * uPixelStride]
+                val pixelIndex = col * vPixelStride
+                // NV21 espera la estructura en secuencia: V, U, V, U...
+                nv21[chromaOffset++] = vRow[pixelIndex]
+                
+                if (pixelIndex < bytesToRead) {
+                    try {
+                        nv21[chromaOffset++] = uBuffer.get(row * uPlane.rowStride + col * uPlane.pixelStride)
+                    } catch (_: Exception) {
+                        nv21[chromaOffset++] = 128 // Fallback seguro de tono neutro
+                    }
+                } else {
+                    nv21[chromaOffset++] = 128
+                }
             }
         }
 

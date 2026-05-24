@@ -15,6 +15,7 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleService // 💡 IMPORTANTE: Asegúrate de importar esto
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.Socket
@@ -24,7 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
-class CameraService : Service() {
+// 💡 Cambiamos de 'Service()' a 'LifecycleService()' para que CameraX tenga un ciclo de vida válido
+class CameraService : LifecycleService() {
 
     companion object {
         private const val TAG = "CameraService"
@@ -59,7 +61,7 @@ class CameraService : Service() {
     private lateinit var cameraExecutor: ExecutorService
 
     override fun onCreate() {
-        super.onCreate()
+        super.onCreate() // LifecycleService maneja internamente su ciclo aquí
         createNotificationChannel()
         cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -71,9 +73,15 @@ class CameraService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent): IBinder? {
+        super.onBind(intent) // Obligatorio llamarlo en LifecycleService
+        return null
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Primero llamamos al super para inicializar el estado del ciclo de vida
+        super.onStartCommand(intent, flags, startId)
+
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             stopSelf()
             return START_NOT_STICKY
@@ -97,7 +105,12 @@ class CameraService : Service() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)   // Sin tipo específico
+        // 💡 SOLUCIÓN CRÍTICA: Se añade el parámetro del tipo de servicio para Android 14 (API 34)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun createNotificationChannel() {
@@ -127,8 +140,10 @@ class CameraService : Service() {
                 }
 
                 cameraProvider?.unbindAll()
+                
+                // 💡 SOLUCIÓN: Ahora 'this' es un LifecycleOwner válido gracias a LifecycleService
                 cameraProvider?.bindToLifecycle(
-                    this as? androidx.lifecycle.LifecycleOwner ?: return@addListener,
+                    this,
                     selector,
                     imageAnalysis
                 )
@@ -213,6 +228,6 @@ class CameraService : Service() {
             outStream?.close()
             outStream = null
         }
-        super.onDestroy()
+        super.onDestroy() // LifecycleService limpiará los observadores automáticamente
     }
 }

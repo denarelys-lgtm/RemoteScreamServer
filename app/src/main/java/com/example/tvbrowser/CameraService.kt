@@ -13,6 +13,7 @@ import android.os.*
 import android.util.Log
 import android.view.SurfaceView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.Socket

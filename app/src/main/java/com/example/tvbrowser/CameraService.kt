@@ -161,7 +161,6 @@ class CameraService : LifecycleService() {
 
     private fun processImage(image: ImageProxy) {
         try {
-            // Conversión correcta reconstruyendo los planos YUV desalineados
             val nv21Bytes = yuv420ToNv21(image)
 
             val out = ByteArrayOutputStream()
@@ -188,7 +187,6 @@ class CameraService : LifecycleService() {
 
         val nv21 = ByteArray(width * height * 3 / 2)
 
-        // 1. Copiar el plano Y fila por fila saltando el relleno extra (Row Stride) de memoria
         val yRowStride = yPlane.rowStride
         var nv21YOffset = 0
         if (yRowStride == width) {
@@ -201,7 +199,6 @@ class CameraService : LifecycleService() {
             }
         }
 
-        // 2. Extraer y entrelazar de forma segura los planos de croma V y U
         val vRowStride = vPlane.rowStride
         val vPixelStride = vPlane.pixelStride
         
@@ -218,17 +215,18 @@ class CameraService : LifecycleService() {
 
             for (col in 0 until chromaWidth) {
                 val pixelIndex = col * vPixelStride
-                // NV21 espera la estructura en secuencia: V, U, V, U...
                 nv21[chromaOffset++] = vRow[pixelIndex]
                 
                 if (pixelIndex < bytesToRead) {
                     try {
                         nv21[chromaOffset++] = uBuffer.get(row * uPlane.rowStride + col * uPlane.pixelStride)
                     } catch (_: Exception) {
-                        nv21[chromaOffset++] = 128 // Fallback seguro de tono neutro
+                        // 💡 CORREGIDO: Casteo explícito a Byte usando .toByte()
+                        nv21[chromaOffset++] = 128.toByte()
                     }
                 } else {
-                    nv21[chromaOffset++] = 128
+                    // 💡 CORREGIDO: Casteo explícito a Byte usando .toByte()
+                    nv21[chromaOffset++] = 128.toByte()
                 }
             }
         }

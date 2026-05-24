@@ -83,47 +83,53 @@ class CameraService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
 
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Permiso de cámara no otorgado. Deteniendo servicio.")
+            Log.e(TAG, "❌ Permiso denegado en el sistema operativo.")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Lanzamos el servicio en primer plano con el parche de seguridad para Android 14
-        startForegroundServiceSimple()
+        // 1. Forzar inicio inmediato en primer plano para cumplir la ventana de tiempo de Android 14
+        startForegroundCompat()
 
         val facing = intent?.getIntExtra("FACING", CameraSelector.LENS_FACING_BACK) ?: CameraSelector.LENS_FACING_BACK
         currentFacing = facing
 
+        // 2. Ejecutar la inicialización de CameraX en el hilo principal de la interfaz
         Handler(Looper.getMainLooper()).post { startCameraX() }
 
         return START_STICKY
     }
 
-    private fun startForegroundServiceSimple() {
+    private fun startForegroundCompat() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Cámara Activa")
-            .setContentText("Transmitiendo en vivo...")
+            .setContentTitle("Servicio Multimedia")
+            .setContentText("Preparando transmisión de video...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // 💡 SOLUCIÓN: Intentamos asignarle el tipo de servicio de cámara de forma segura
+                // Se solicita el registro con el tipo nativo requerido
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "⚠️ Error de sincronización de permisos al iniciar FGS tipo CAMERA. Reintentando modo clásico.", e)
-            // Fallback seguro: Inicia el servicio de fondo clásico para evitar que la aplicación se cierre bruscamente
+            Log.e(TAG, "⚠️ Restricción de ejecución en segundo plano detectada. Reintentando modo base.", e)
+            // Fallback para evitar el cierre forzado de la aplicación
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "Cámara", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID, 
+                "Transmisión de Cámara", 
+                NotificationManager.IMPORTANCE_LOW
+            )
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
         }
     }
@@ -137,6 +143,7 @@ class CameraService : LifecycleService() {
 
                 val selector = CameraSelector.Builder().requireLensFacing(currentFacing).build()
 
+                // Cálculo adaptativo de la orientación física del hardware del dispositivo
                 val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
                 val displayRotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     this.display?.rotation ?: Surface.ROTATION_0
@@ -169,10 +176,10 @@ class CameraService : LifecycleService() {
                 sendCameraAvailabilityToClient(true)
                 startReconnectLoop()
 
-                Log.i(TAG, "✅ CameraX iniciada correctamente!")
+                Log.i(TAG, "✅ Procesador CameraX enlazado y transmitiendo de forma segura.")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error al iniciar CameraX", e)
+                Log.e(TAG, "❌ Error crítico al enlazar componentes de CameraX", e)
                 isCameraAvailable = false
                 sendCameraAvailabilityToClient(false)
             }
@@ -189,7 +196,7 @@ class CameraService : LifecycleService() {
 
             sendFrame(out.toByteArray())
         } catch (e: Exception) {
-            Log.e(TAG, "Error procesando el frame de la cámara", e)
+            Log.e(TAG, "Error en procesamiento de flujo YUV", e)
         }
     }
 

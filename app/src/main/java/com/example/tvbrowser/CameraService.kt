@@ -11,6 +11,8 @@ import android.graphics.YuvImage
 import android.os.*
 import android.util.Log
 import android.util.Size
+import android.view.Surface
+import android.view.WindowManager
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
@@ -126,8 +128,19 @@ class CameraService : LifecycleService() {
 
                 val selector = CameraSelector.Builder().requireLensFacing(currentFacing).build()
 
+                // 💡 Detectamos la rotación actual de la pantalla para orientar la cámara de forma nativa
+                val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val displayRotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    this.display?.rotation ?: Surface.ROTATION_0
+                } else {
+                    @Suppress("DEPRECATION")
+                    windowManager.defaultDisplay.rotation
+                }
+
                 imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
+                    // 💡 SOLUCIÓN: Si por defecto sigue al revés debido al hardware, cambia 'displayRotation' por 'Surface.ROTATION_180'
+                    .setTargetRotation(displayRotation)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
@@ -221,11 +234,9 @@ class CameraService : LifecycleService() {
                     try {
                         nv21[chromaOffset++] = uBuffer.get(row * uPlane.rowStride + col * uPlane.pixelStride)
                     } catch (_: Exception) {
-                        // 💡 CORREGIDO: Casteo explícito a Byte usando .toByte()
                         nv21[chromaOffset++] = 128.toByte()
                     }
                 } else {
-                    // 💡 CORREGIDO: Casteo explícito a Byte usando .toByte()
                     nv21[chromaOffset++] = 128.toByte()
                 }
             }

@@ -62,6 +62,9 @@ class CameraService : LifecycleService() {
 
     private var currentFacing = CameraSelector.LENS_FACING_BACK
     private var clientIp = "127.0.0.1"
+    
+    // 🔥 Bandera para evitar llamadas duplicadas a startForeground
+    private var isForegroundAttached = false
 
     private lateinit var cameraExecutor: ExecutorService
 
@@ -87,7 +90,7 @@ class CameraService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
 
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Abortando inicio de FGS: Permiso de cámara NO otorgado.")
+            Log.e(TAG, "❌ Abortando inicio: Permiso de cámara NO otorgado.")
             isCameraAvailable = false
             val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
             broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, if (clientFacingExtra == 1) 0 else 1)
@@ -95,7 +98,10 @@ class CameraService : LifecycleService() {
             return START_NOT_STICKY
         }
 
-        startForegroundCompat()
+        // 🔥 SOLO iniciar foreground si no se ha vinculado antes
+        if (!isForegroundAttached) {
+            startForegroundCompat()
+        }
 
         val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
         currentFacing = if (clientFacingExtra == 1) {
@@ -104,6 +110,7 @@ class CameraService : LifecycleService() {
             CameraSelector.LENS_FACING_BACK
         }
 
+        // Ejecutar los cambios de CameraX de manera segura en el hilo principal
         Handler(Looper.getMainLooper()).post { startCameraX() }
 
         return START_STICKY
@@ -125,9 +132,11 @@ class CameraService : LifecycleService() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            isForegroundAttached = true
         } catch (e: SecurityException) {
             Log.e(TAG, "⚠️ Fallo al asignar tipo de servicio. Forzando modo estándar.", e)
             startForeground(NOTIFICATION_ID, notification)
+            isForegroundAttached = true
         }
     }
 
@@ -161,7 +170,7 @@ class CameraService : LifecycleService() {
                     image.close()
                 }
 
-                // Limpiar cualquier enlace anterior antes de cambiar de cámara
+                // Liberar de manera limpia los flujos previos del lente anterior
                 cameraProvider?.unbindAll()
                 cameraProvider?.bindToLifecycle(this, selector, imageAnalysis)
 
@@ -173,10 +182,10 @@ class CameraService : LifecycleService() {
                 sendCameraAvailabilityToClient(true, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
                 broadcastCameraEvent(ACTION_CAMERA_AVAILABLE, systemFacingId)
                 
-                // Reiniciar el bucle de conexión de forma segura
+                // Reiniciar el bucle de conexión de red de forma segura
                 startReconnectLoop()
 
-                Log.i(TAG, "✅ CameraX reconfigurado con éxito.")
+                Log.i(TAG, "✅ CameraX cambiado de lente de forma exitosa.")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error al enlazar CameraX", e)
@@ -212,7 +221,7 @@ class CameraService : LifecycleService() {
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val yBuffer = yPlane.buffer
+        val yBuffer = yBuffer@yPlane.buffer
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
@@ -275,7 +284,6 @@ class CameraService : LifecycleService() {
     }
 
     private fun startReconnectLoop() {
-        // Interrumpir el hilo anterior de forma controlada
         reconnectThread?.interrupt()
         
         reconnectThread = thread(start = true) {
@@ -289,12 +297,10 @@ class CameraService : LifecycleService() {
                             } catch (_: Exception) {}
                         }
                     }
-                    // 🔥 CORREGIDO: Dormir el hilo capturando el InterruptedException de forma segura
                     Thread.sleep(3500)
                 }
             } catch (e: InterruptedException) {
-                Log.i(TAG, "🔄 Reconnect loop interrumpido correctamente para cambio de cámara.")
-                // Salida limpia del hilo sin crasear la app
+                Log.i(TAG, "🔄 Reconnect loop interrumpido para cambio de lente.")
             }
         }
     }
@@ -319,6 +325,7 @@ class CameraService : LifecycleService() {
 
     override fun onDestroy() {
         isStreaming.set(false)
+        isForegroundAttached = false
         reconnectThread?.interrupt()
         cameraProvider?.unbindAll()
         cameraExecutor.shutdown()

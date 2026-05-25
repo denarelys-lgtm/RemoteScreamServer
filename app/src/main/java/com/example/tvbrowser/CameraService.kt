@@ -27,6 +27,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
+// Interfaz requerida por WebServerService
+interface FrameProvider {
+    fun getLatestFrame(): ByteArray?
+}
+
 class CameraService : LifecycleService() {
 
     companion object {
@@ -35,9 +40,25 @@ class CameraService : LifecycleService() {
         private const val NOTIFICATION_CHANNEL_ID = "cam_ch"
         private const val NOTIFICATION_ID = 1
 
+        // 🔥 RECONECTADOS: Constantes requeridas por el MainActivity
+        const val ACTION_CAMERA_AVAILABLE = "com.example.tvbrowser.CAMERA_AVAILABLE"
+        const val ACTION_CAMERA_UNAVAILABLE = "com.example.tvbrowser.CAMERA_UNAVAILABLE"
+        const val EXTRA_CAMERA_FACING = "camera_facing"
+
+        // 🔥 RECONECTADOS: Variables y métodos estáticos requeridos por WebServerService
+        @Volatile
+        var latestFrameProvider: FrameProvider? = null
+
+        @Volatile
+        private var currentBufferFrame: ByteArray? = null
+
         internal val isStreaming = AtomicBoolean(false)
         @Volatile
         internal var isCameraAvailable = true
+
+        fun updateCipherKey(key: SecretKeySpec) {
+            // Mantenido por compatibilidad estructural
+        }
     }
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -59,6 +80,11 @@ class CameraService : LifecycleService() {
 
         val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
         clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
+
+        // Inicializar el proveedor de frames para el WebServerService
+        latestFrameProvider = object : FrameProvider {
+            override fun getLatestFrame(): ByteArray? = currentBufferFrame
+        }
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -75,10 +101,8 @@ class CameraService : LifecycleService() {
             return START_NOT_STICKY
         }
 
-        // Forzar prioridad máxima exigida por Android 16
         startForegroundCompat()
 
-        // Traducir los comandos del cliente (0 y 1) a constantes CameraX
         val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
         currentFacing = if (clientFacingExtra == 1) {
             CameraSelector.LENS_FACING_FRONT
@@ -134,7 +158,7 @@ class CameraService : LifecycleService() {
 
                 imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
-                    .setTargetRotation(Surface.ROTATION_0) // Se envía limpio a 0° para acelerar la red
+                    .setTargetRotation(Surface.ROTATION_0)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
@@ -149,8 +173,11 @@ class CameraService : LifecycleService() {
                 isStreaming.set(true)
                 isCameraAvailable = true
                 
-                val clientFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0
-                sendCameraAvailabilityToClient(true, clientFacingId)
+                // Mapear de vuelta al ID esperado por MainActivity (Back2, Front0 de Camera2 API original)
+                val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 0 else 1
+                
+                sendCameraAvailabilityToClient(true, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
+                broadcastCameraEvent(ACTION_CAMERA_AVAILABLE, systemFacingId)
                 startReconnectLoop()
 
                 Log.i(TAG, "✅ CameraX enlazado correctamente.")
@@ -158,8 +185,10 @@ class CameraService : LifecycleService() {
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error al enlazar CameraX", e)
                 isCameraAvailable = false
-                val clientFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0
-                sendCameraAvailabilityToClient(false, clientFacingId)
+                val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 0 else 1
+                
+                sendCameraAvailabilityToClient(false, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
+                broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, systemFacingId)
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -170,7 +199,11 @@ class CameraService : LifecycleService() {
             val out = ByteArrayOutputStream()
             val yuvImage = YuvImage(nv21Bytes, ImageFormat.NV21, image.width, image.height, null)
             yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 75, out)
-            sendFrame(out.toByteArray())
+            
+            val jpegBytes = out.toByteArray()
+            currentBufferFrame = jpegBytes // Almacenar para WebServerService
+            
+            sendFrame(jpegBytes)
         } catch (e: Exception) {
             Log.e(TAG, "Error en compresión YUV", e)
         }
@@ -273,11 +306,20 @@ class CameraService : LifecycleService() {
         }
     }
 
+    // Enviar broadcast local al MainActivity
+    private fun broadcastCameraEvent(action: String, facingId: Int) {
+        val intent = Intent(action).apply {
+            putExtra(EXTRA_CAMERA_FACING, facingId)
+        }
+        sendBroadcast(intent)
+    }
+
     override fun onDestroy() {
         isStreaming.set(false)
         reconnectThread?.interrupt()
         cameraProvider?.unbindAll()
         cameraExecutor.shutdown()
+        currentBufferFrame = null
         synchronized(netLock) {
             outStream?.close()
             outStream = null

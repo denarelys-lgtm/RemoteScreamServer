@@ -27,11 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
-// Interfaz requerida por WebServerService
-interface FrameProvider {
-    fun getLatestFrame(): ByteArray?
-}
-
 class CameraService : LifecycleService() {
 
     companion object {
@@ -40,12 +35,12 @@ class CameraService : LifecycleService() {
         private const val NOTIFICATION_CHANNEL_ID = "cam_ch"
         private const val NOTIFICATION_ID = 1
 
-        // 🔥 RECONECTADOS: Constantes requeridas por el MainActivity
+        // Constantes requeridas por el MainActivity
         const val ACTION_CAMERA_AVAILABLE = "com.example.tvbrowser.CAMERA_AVAILABLE"
         const val ACTION_CAMERA_UNAVAILABLE = "com.example.tvbrowser.CAMERA_UNAVAILABLE"
         const val EXTRA_CAMERA_FACING = "camera_facing"
 
-        // 🔥 RECONECTADOS: Variables y métodos estáticos requeridos por WebServerService
+        // Variables y métodos estáticos requeridos por WebServerService
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
@@ -81,7 +76,7 @@ class CameraService : LifecycleService() {
         val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
         clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
 
-        // Inicializar el proveedor de frames para el WebServerService
+        // Inicializar usando tu FrameProvider.kt existente del proyecto
         latestFrameProvider = object : FrameProvider {
             override fun getLatestFrame(): ByteArray? = currentBufferFrame
         }
@@ -173,7 +168,6 @@ class CameraService : LifecycleService() {
                 isStreaming.set(true)
                 isCameraAvailable = true
                 
-                // Mapear de vuelta al ID esperado por MainActivity (Back2, Front0 de Camera2 API original)
                 val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 0 else 1
                 
                 sendCameraAvailabilityToClient(true, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
@@ -201,7 +195,7 @@ class CameraService : LifecycleService() {
             yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 75, out)
             
             val jpegBytes = out.toByteArray()
-            currentBufferFrame = jpegBytes // Almacenar para WebServerService
+            currentBufferFrame = jpegBytes 
             
             sendFrame(jpegBytes)
         } catch (e: Exception) {
@@ -306,7 +300,6 @@ class CameraService : LifecycleService() {
         }
     }
 
-    // Enviar broadcast local al MainActivity
     private fun broadcastCameraEvent(action: String, facingId: Int) {
         val intent = Intent(action).apply {
             putExtra(EXTRA_CAMERA_FACING, facingId)

@@ -183,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
     }
 
+    // 🔥 MODIFICADO: Adaptado completamente con el puente InvisibleTrampolineActivity para compatibilidad con Android 16
     private fun startCommandListener() {
         listeningThread = thread(start = true) {
             try {
@@ -198,10 +199,35 @@ class MainActivity : AppCompatActivity() {
                     client.close()
 
                     runOnUiThread {
-                        when (command) {
+                        when (command?.trim()) {
                             "START_SCREEN" -> shareButton.performClick()
-                            "START_BACK" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_BACK)
-                            "START_FRONT" -> startCameraWithPermissionCheck(CameraCharacteristics.LENS_FACING_FRONT)
+                            "START_BACK" -> {
+                                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                    pendingCameraFacing = CameraCharacteristics.LENS_FACING_BACK
+                                    ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+                                } else {
+                                    // Pasamos por la actividad trampolín para heredar foco de primer plano seguro en Android 16
+                                    val intent = Intent(this@MainActivity, InvisibleTrampolineActivity::class.java).apply {
+                                        putExtra("FACING", 0) 
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                                    }
+                                    startActivity(intent)
+                                    prefs.edit().putInt("last_camera_facing", CameraCharacteristics.LENS_FACING_BACK).apply()
+                                }
+                            }
+                            "START_FRONT" -> {
+                                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                    pendingCameraFacing = CameraCharacteristics.LENS_FACING_FRONT
+                                    ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+                                } else {
+                                    val intent = Intent(this@MainActivity, InvisibleTrampolineActivity::class.java).apply {
+                                        putExtra("FACING", 1) 
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                                    }
+                                    startActivity(intent)
+                                    prefs.edit().putInt("last_camera_facing", CameraCharacteristics.LENS_FACING_FRONT).apply()
+                                }
+                            }
                             "STOP_CAMERA", "STOP" -> stopCameraService()
                         }
                     }
@@ -212,17 +238,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startCameraWithPermissionCheck(facing: Int) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            pendingCameraFacing = facing
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
-        } else {
-            startCameraService(facing)
-        }
-    }
-
     private fun startCameraService(facing: Int) {
-        stopCameraService() // Cerrar antes de iniciar para evitar conflictos
+        stopCameraService() 
 
         val intent = Intent(this, CameraService::class.java).apply {
             putExtra("FACING", facing)
@@ -240,11 +257,11 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("last_camera_facing").apply()
     }
 
-    // 💡 CORREGIDO: Evita iniciar el FGS si el usuario retiró los permisos manualmente desde los ajustes.
     private fun restoreLastCamera() {
         val lastFacing = prefs.getInt("last_camera_facing", -1)
         if (lastFacing != -1) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                // Para restauraciones internas locales directas cuando la app ya está visible
                 startCameraService(lastFacing)
             } else {
                 prefs.edit().remove("last_camera_facing").apply()
@@ -282,7 +299,13 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CAMERA_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startCameraService(pendingCameraFacing)
+            // Mapeamos el ID correcto para el disparo inicial tras otorgar permiso físico
+            val targetFacing = if (pendingCameraFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else 0
+            val intent = Intent(this, InvisibleTrampolineActivity::class.java).apply {
+                putExtra("FACING", targetFacing)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
+            startActivity(intent)
         } else {
             Toast.makeText(this, "Se necesita permiso de cámara", Toast.LENGTH_SHORT).show()
         }

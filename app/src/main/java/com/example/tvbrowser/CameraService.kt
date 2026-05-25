@@ -86,9 +86,8 @@ class CameraService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
-        // 🔥 PASO CRÍTICO: Verificar el permiso en tiempo de ejecución ANTES de llamar a startForeground
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Abortando inicio de FGS: Permiso de cámara NO otorgado por el usuario.")
+            Log.e(TAG, "❌ Abortando inicio de FGS: Permiso de cámara NO otorgado.")
             isCameraAvailable = false
             val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
             broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, if (clientFacingExtra == 1) 0 else 1)
@@ -96,7 +95,6 @@ class CameraService : LifecycleService() {
             return START_NOT_STICKY
         }
 
-        // Si tenemos el permiso garantizado por el sistema, iniciamos el servicio en primer plano de forma segura
         startForegroundCompat()
 
         val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
@@ -123,14 +121,12 @@ class CameraService : LifecycleService() {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Especificamos explícitamente el tipo de servicio requerido por Android 14
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "⚠️ Fallo al asignar tipo de servicio. Forzando modo estándar.", e)
-            // Fallback de emergencia si el OS restringe el tipo específico temporalmente
             startForeground(NOTIFICATION_ID, notification)
         }
     }
@@ -165,6 +161,7 @@ class CameraService : LifecycleService() {
                     image.close()
                 }
 
+                // Limpiar cualquier enlace anterior antes de cambiar de cámara
                 cameraProvider?.unbindAll()
                 cameraProvider?.bindToLifecycle(this, selector, imageAnalysis)
 
@@ -175,9 +172,11 @@ class CameraService : LifecycleService() {
                 
                 sendCameraAvailabilityToClient(true, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
                 broadcastCameraEvent(ACTION_CAMERA_AVAILABLE, systemFacingId)
+                
+                // Reiniciar el bucle de conexión de forma segura
                 startReconnectLoop()
 
-                Log.i(TAG, "✅ CameraX inicializado de forma segura.")
+                Log.i(TAG, "✅ CameraX reconfigurado con éxito.")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error al enlazar CameraX", e)
@@ -213,7 +212,7 @@ class CameraService : LifecycleService() {
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val yBuffer = yBuffer@yPlane.buffer
+        val yBuffer = yPlane.buffer
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
@@ -276,18 +275,26 @@ class CameraService : LifecycleService() {
     }
 
     private fun startReconnectLoop() {
+        // Interrumpir el hilo anterior de forma controlada
         reconnectThread?.interrupt()
+        
         reconnectThread = thread(start = true) {
-            while (isStreaming.get()) {
-                synchronized(netLock) {
-                    if (outStream == null) {
-                        try {
-                            val socket = Socket(clientIp, PORT).apply { tcpNoDelay = true }
-                            outStream = DataOutputStream(socket.getOutputStream())
-                        } catch (_: Exception) {}
+            try {
+                while (isStreaming.get() && !Thread.currentThread().isInterrupted) {
+                    synchronized(netLock) {
+                        if (outStream == null) {
+                            try {
+                                val socket = Socket(clientIp, PORT).apply { tcpNoDelay = true }
+                                outStream = DataOutputStream(socket.getOutputStream())
+                            } catch (_: Exception) {}
+                        }
                     }
+                    // 🔥 CORREGIDO: Dormir el hilo capturando el InterruptedException de forma segura
+                    Thread.sleep(3500)
                 }
-                Thread.sleep(3500)
+            } catch (e: InterruptedException) {
+                Log.i(TAG, "🔄 Reconnect loop interrumpido correctamente para cambio de cámara.")
+                // Salida limpia del hilo sin crasear la app
             }
         }
     }

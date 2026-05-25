@@ -12,7 +12,6 @@ import android.os.*
 import android.util.Log
 import android.util.Size
 import android.view.Surface
-import android.view.WindowManager
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
@@ -35,12 +34,10 @@ class CameraService : LifecycleService() {
         private const val NOTIFICATION_CHANNEL_ID = "cam_ch"
         private const val NOTIFICATION_ID = 1
 
-        // Constantes requeridas por el MainActivity
         const val ACTION_CAMERA_AVAILABLE = "com.example.tvbrowser.CAMERA_AVAILABLE"
         const val ACTION_CAMERA_UNAVAILABLE = "com.example.tvbrowser.CAMERA_UNAVAILABLE"
         const val EXTRA_CAMERA_FACING = "camera_facing"
 
-        // Variables y métodos estáticos requeridos por WebServerService
         @Volatile
         var latestFrameProvider: FrameProvider? = null
 
@@ -76,7 +73,6 @@ class CameraService : LifecycleService() {
         val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
         clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
 
-        // Inicializar usando tu FrameProvider.kt existente del proyecto
         latestFrameProvider = object : FrameProvider {
             override fun getLatestFrame(): ByteArray? = currentBufferFrame
         }
@@ -90,12 +86,17 @@ class CameraService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
+        // 🔥 PASO CRÍTICO: Verificar el permiso en tiempo de ejecución ANTES de llamar a startForeground
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Sin permiso de cámara.")
+            Log.e(TAG, "❌ Abortando inicio de FGS: Permiso de cámara NO otorgado por el usuario.")
+            isCameraAvailable = false
+            val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
+            broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, if (clientFacingExtra == 1) 0 else 1)
             stopSelf()
             return START_NOT_STICKY
         }
 
+        // Si tenemos el permiso garantizado por el sistema, iniciamos el servicio en primer plano de forma segura
         startForegroundCompat()
 
         val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
@@ -122,12 +123,14 @@ class CameraService : LifecycleService() {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Especificamos explícitamente el tipo de servicio requerido por Android 14
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "⚠️ Forzando inicio base por restricción FGS", e)
+            Log.e(TAG, "⚠️ Fallo al asignar tipo de servicio. Forzando modo estándar.", e)
+            // Fallback de emergencia si el OS restringe el tipo específico temporalmente
             startForeground(NOTIFICATION_ID, notification)
         }
     }
@@ -174,7 +177,7 @@ class CameraService : LifecycleService() {
                 broadcastCameraEvent(ACTION_CAMERA_AVAILABLE, systemFacingId)
                 startReconnectLoop()
 
-                Log.i(TAG, "✅ CameraX enlazado correctamente.")
+                Log.i(TAG, "✅ CameraX inicializado de forma segura.")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error al enlazar CameraX", e)
@@ -199,7 +202,7 @@ class CameraService : LifecycleService() {
             
             sendFrame(jpegBytes)
         } catch (e: Exception) {
-            Log.e(TAG, "Error en compresión YUV", e)
+            Log.e(TAG, "Error en procesamiento de cuadro", e)
         }
     }
 
@@ -210,7 +213,7 @@ class CameraService : LifecycleService() {
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val yBuffer = yPlane.buffer
+        val yBuffer = yBuffer@yPlane.buffer
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 

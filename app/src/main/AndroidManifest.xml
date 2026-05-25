@@ -45,7 +45,7 @@
 
         <activity
             android:name=".InvisibleTrampolineActivity"
-            android:theme="@style/Theme.AppCompat.Translucent.NoTitleBar"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:exported="false" />
 

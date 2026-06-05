@@ -41,6 +41,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".InvisibleTrampolineActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+
         <receiver
             android:name=".MyDeviceAdminReceiver"
             android:label="ScreenShare Admin"

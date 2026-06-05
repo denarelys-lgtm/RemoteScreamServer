@@ -23,9 +23,13 @@ import java.nio.ByteBuffer
 
 class ScreenCastService : Service() {
 
-    private companion object {
+    companion object {
         const val TAG = "ScreenCastService"
         const val SCREEN_PORT = 9000
+        
+        // Almacena el último frame de forma estática para WebServerService
+        @JvmStatic
+        var latestFrameProvider: ByteArray? = null
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -74,7 +78,6 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getRealMetrics(metrics)
         
-        // Escalado intermedio para balancear consumo y preservar el ancho de banda del socket
         val width = 720
         val height = 1280
         val density = metrics.densityDpi
@@ -113,6 +116,9 @@ class ScreenCastService : Service() {
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 50, baos)
                     val bytes = baos.toByteArray()
                     bitmap.recycle()
+
+                    // Compartir frame con el servidor local HTTP
+                    latestFrameProvider = bytes
 
                     outputStream?.write(ByteBuffer.allocate(4).putInt(bytes.size).array())
                     outputStream?.write(bytes)

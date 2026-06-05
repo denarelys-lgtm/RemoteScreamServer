@@ -1,4 +1,4 @@
-package com.example.remotescreamserver
+package com.example.tvbrowser
 
 import android.app.Service
 import android.content.Context

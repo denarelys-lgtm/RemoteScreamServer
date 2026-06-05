@@ -4,8 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
@@ -26,9 +24,13 @@ import java.util.concurrent.Executors
 
 class CameraService : LifecycleService() {
 
-    private companion object {
+    companion object {
         const val TAG = "CameraService"
         const val CAMERA_PORT = 9002
+        
+        // Almacena el último frame de forma estática para WebServerService
+        @JvmStatic
+        var latestFrameProvider: ByteArray? = null
     }
 
     private lateinit var cameraExecutor: ExecutorService
@@ -39,7 +41,6 @@ class CameraService : LifecycleService() {
     private var outputStream: OutputStream? = null
     private var isStreaming = false
 
-    // Locks para evitar que el sistema duerma la CPU o el Wi-Fi
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -47,12 +48,13 @@ class CameraService : LifecycleService() {
         super.onCreate()
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Adquirir candados de persistencia absoluta
+        // Forzar a la CPU a mantenerse despierta aunque la pantalla se apague
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RemoteScream::CameraWakeLock").apply {
-            acquire(10 * 60 * 1000L /*10 minutos o indefinido*/)
+            acquire(10 * 60 * 1000L)
         }
 
+        // Forzar al Wi-Fi a transmitir a máxima capacidad en segundo plano
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "RemoteScream::CameraWifiLock").apply {
             acquire()
@@ -71,7 +73,6 @@ class CameraService : LifecycleService() {
             startCameraStreaming()
         }
 
-        // START_STICKY garantiza que si el sistema lo llega a matar por RAM, se reinicie solo
         return START_STICKY
     }
 
@@ -81,7 +82,6 @@ class CameraService : LifecycleService() {
             try {
                 val cameraProvider = cameraProviderFuture.get()
 
-                // Solicitamos RGBA_8888 para evitar errores de codificación cromática (colores verdes/rotados)
                 val imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -97,13 +97,12 @@ class CameraService : LifecycleService() {
                     .build()
 
                 cameraProvider.unbindAll()
-                // Al heredar de LifecycleService, 'this' actúa como el LifecycleOwner persistente
                 cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
 
-                // Notificar de vuelta al sistema local el estado real de la cámara activa
+                // Enviar la señal de disponibilidad usando las constantes de la app
                 val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0
-                val broadcastIntent = Intent("CAMERA_AVAILABLE").apply {
-                    putExtra("FACING", systemFacingId)
+                val broadcastIntent = Intent(MainActivity.ACTION_CAMERA_AVAILABLE).apply {
+                    putExtra(MainActivity.EXTRA_CAMERA_FACING, systemFacingId)
                 }
                 sendBroadcast(broadcastIntent)
 
@@ -116,7 +115,6 @@ class CameraService : LifecycleService() {
     private fun enviarFrameAlCliente(imageProxy: ImageProxy) {
         try {
             if (socket == null || socket?.isClosed == true) {
-                Log.d(TAG, "Conectando socket de cámara hacia el cliente $clientIp:$CAMERA_PORT...")
                 socket = Socket(clientIp, CAMERA_PORT)
                 outputStream = socket?.getOutputStream()
             }
@@ -124,16 +122,18 @@ class CameraService : LifecycleService() {
             val bitmap = imageProxyToBitmap(imageProxy)
             if (bitmap != null) {
                 val baos = ByteArrayOutputStream()
-                // Compresión balanceada para fluidez en tiempo real
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                 val bytes = baos.toByteArray()
+
+                // Compartir frame con el servidor local HTTP
+                latestFrameProvider = bytes
 
                 outputStream?.write(ByteBuffer.allocate(4).putInt(bytes.size).array())
                 outputStream?.write(bytes)
                 outputStream?.flush()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error de red enviando frame: ${e.message}")
+            Log.e(TAG, "Error de red enviando frame de cámara: ${e.message}")
             cerrarSockets()
         } finally {
             imageProxy.close()
@@ -154,12 +154,10 @@ class CameraService : LifecycleService() {
         buffer.rewind()
         bitmap.copyPixelsFromBuffer(buffer)
 
-        // Corregir la rotación nativa del sensor antes de enviarlo
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         return if (rotationDegrees != 0) {
             val matrix = Matrix().apply { 
                 postRotate(rotationDegrees.toFloat())
-                // Si es la cámara frontal, aplicar espejo horizontal nativo
                 if (currentFacing == CameraSelector.LENS_FACING_FRONT) {
                     postScale(-1f, 1f)
                 }
@@ -171,10 +169,8 @@ class CameraService : LifecycleService() {
     }
 
     private fun cerrarSockets() {
-        try {
-            outputStream?.close()
-            socket?.close()
-        } catch (_: Exception) {}
+        try { outputStream?.close() } catch (_: Exception) {}
+        try { socket?.close() } catch (_: Exception) {}
         socket = null
         outputStream = null
     }
@@ -186,6 +182,9 @@ class CameraService : LifecycleService() {
         
         if (wakeLock?.isHeld == true) wakeLock?.release()
         if (wifiLock?.isHeld == true) wifiLock?.release()
+        
+        val broadcastIntent = Intent(MainActivity.ACTION_CAMERA_UNAVAILABLE)
+        sendBroadcast(broadcastIntent)
         
         super.onDestroy()
     }

@@ -32,7 +32,7 @@
         tools:targetApi="34">
 
         <activity
-            android:name=".MainActivity"
+            android:name="${applicationId}.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -41,31 +41,31 @@
         </activity>
 
         <activity
-            android:name=".InvisibleTrampolineActivity"
+            android:name="${applicationId}.InvisibleTrampolineActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:exported="false" />
 
         <service
-            android:name=".CameraService"
+            android:name="${applicationId}.CameraService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="camera" />
 
         <service
-            android:name=".ScreenCastService"
+            android:name="${applicationId}.ScreenCastService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
         <service
-            android:name=".WebServerService"
+            android:name="${applicationId}.WebServerService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
         <receiver
-            android:name=".BootReceiver"
+            android:name="${applicationId}.BootReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>

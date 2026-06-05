@@ -1,275 +1,192 @@
-package com.example.tvbrowser
+package com.example.remotescreamserver
 
-import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
-import android.graphics.ImageFormat
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
-import android.os.*
+import android.net.wifi.WifiManager
+import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import android.util.Size
-import android.view.Surface
-import androidx.camera.core.*
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
+import java.io.OutputStream
 import java.net.Socket
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import javax.crypto.spec.SecretKeySpec
-import kotlin.concurrent.thread
 
 class CameraService : LifecycleService() {
 
-    companion object {
-        private const val TAG = "CameraService"
-        private const val PORT = 9002
-        private const val NOTIFICATION_CHANNEL_ID = "cam_ch"
-        private const val NOTIFICATION_ID = 1
-        const val ACTION_CAMERA_AVAILABLE = "com.example.tvbrowser.CAMERA_AVAILABLE"
-        const val ACTION_CAMERA_UNAVAILABLE = "com.example.tvbrowser.CAMERA_UNAVAILABLE"
-        const val EXTRA_CAMERA_FACING = "camera_facing"
-
-        @Volatile var latestFrameProvider: FrameProvider? = null
-        @Volatile private var currentBufferFrame: ByteArray? = null
-        internal val isStreaming = AtomicBoolean(false)
-        @Volatile internal var isCameraAvailable = true
-
-        fun updateCipherKey(key: SecretKeySpec) {}
+    private companion object {
+        const val TAG = "CameraService"
+        const val CAMERA_PORT = 9002
     }
 
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var imageAnalysis: ImageAnalysis? = null
-    private val netLock = Object()
-    private var outStream: DataOutputStream? = null
-    private var reconnectThread: Thread? = null
-    private var currentFacing = CameraSelector.LENS_FACING_BACK
-    private var clientIp = "127.0.0.1"
-    private var isForegroundAttached = false
     private lateinit var cameraExecutor: ExecutorService
+    private var clientIp: String? = null
+    private var currentFacing = CameraSelector.LENS_FACING_BACK
+    
+    private var socket: Socket? = null
+    private var outputStream: OutputStream? = null
+    private var isStreaming = false
+
+    // Locks para evitar que el sistema duerma la CPU o el Wi-Fi
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
         cameraExecutor = Executors.newSingleThreadExecutor()
-        val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
-        clientIp = prefs.getString("client_ip", "127.0.0.1") ?: "127.0.0.1"
-        latestFrameProvider = object : FrameProvider {
-            override fun getLatestFrame(): ByteArray? = currentBufferFrame
+
+        // Adquirir candados de persistencia absoluta
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RemoteScream::CameraWakeLock").apply {
+            acquire(10 * 60 * 1000L /*10 minutos o indefinido*/)
+        }
+
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "RemoteScream::CameraWifiLock").apply {
+            acquire()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Permiso de cámara NO otorgado.")
-            isCameraAvailable = false
-            val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
-            broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, if (clientFacingExtra == 1) 0 else 1)
-            stopSelf()
-            return START_NOT_STICKY
+        
+        clientIp = intent?.getStringExtra("CLIENT_IP")
+        val facingExtra = intent?.getIntExtra("FACING", 0) ?: 0
+        currentFacing = if (facingExtra == 1) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+
+        if (!clientIp.isNullOrEmpty() && !isStreaming) {
+            isStreaming = true
+            startCameraStreaming()
         }
 
-        if (!isForegroundAttached) {
-            startForegroundCompat()
-        }
-
-        val clientFacingExtra = intent?.getIntExtra("FACING", 0) ?: 0
-        currentFacing = if (clientFacingExtra == 1) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-
-        Handler(Looper.getMainLooper()).post { startCameraX() }
+        // START_STICKY garantiza que si el sistema lo llega a matar por RAM, se reinicie solo
         return START_STICKY
     }
 
-    private fun startForegroundCompat() {
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Streaming de Video")
-            .setContentText("Transmitiendo cámara en vivo...")
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-            isForegroundAttached = true
-        } catch (e: SecurityException) {
-            startForeground(NOTIFICATION_ID, notification)
-            isForegroundAttached = true
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "Canal Cámara", NotificationManager.IMPORTANCE_HIGH)
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
-        }
-    }
-
-    private fun startCameraX() {
+    private fun startCameraStreaming() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             try {
-                cameraProvider = cameraProviderFuture.get()
-                val selector = CameraSelector.Builder().requireLensFacing(currentFacing).build()
-                imageAnalysis = ImageAnalysis.Builder()
+                val cameraProvider = cameraProviderFuture.get()
+
+                // Solicitamos RGBA_8888 para evitar errores de codificación cromática (colores verdes/rotados)
+                val imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
-                    .setTargetRotation(Surface.ROTATION_0)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
-                imageAnalysis?.setAnalyzer(cameraExecutor) { image ->
-                    processImage(image)
-                    image.close()
+                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                    enviarFrameAlCliente(imageProxy)
                 }
 
-                cameraProvider?.unbindAll()
-                cameraProvider?.bindToLifecycle(this, selector, imageAnalysis)
-                isStreaming.set(true)
-                isCameraAvailable = true
-                val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 0 else 1
-                sendCameraAvailabilityToClient(true, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
-                broadcastCameraEvent(ACTION_CAMERA_AVAILABLE, systemFacingId)
-                startReconnectLoop()
+                val cameraSelector = CameraSelector.Builder()
+                    .requireLensFacing(currentFacing)
+                    .build()
+
+                cameraProvider.unbindAll()
+                // Al heredar de LifecycleService, 'this' actúa como el LifecycleOwner persistente
+                cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
+
+                // Notificar de vuelta al sistema local el estado real de la cámara activa
+                val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0
+                val broadcastIntent = Intent("CAMERA_AVAILABLE").apply {
+                    putExtra("FACING", systemFacingId)
+                }
+                sendBroadcast(broadcastIntent)
+
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error al enlazar CameraX", e)
-                isCameraAvailable = false
-                val systemFacingId = if (currentFacing == CameraSelector.LENS_FACING_FRONT) 0 else 1
-                sendCameraAvailabilityToClient(false, if (currentFacing == CameraSelector.LENS_FACING_FRONT) 1 else 0)
-                broadcastCameraEvent(ACTION_CAMERA_UNAVAILABLE, systemFacingId)
+                Log.e(TAG, "Error al inicializar CameraX: ${e.message}")
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun processImage(image: ImageProxy) {
+    private fun enviarFrameAlCliente(imageProxy: ImageProxy) {
         try {
-            val nv21Bytes = yuv420ToNv21Optimized(image)
-            val out = ByteArrayOutputStream()
-            val yuvImage = YuvImage(nv21Bytes, ImageFormat.NV21, image.width, image.height, null)
-            yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 75, out)
-            val jpegBytes = out.toByteArray()
-            currentBufferFrame = jpegBytes
-            sendFrame(jpegBytes)
+            if (socket == null || socket?.isClosed == true) {
+                Log.d(TAG, "Conectando socket de cámara hacia el cliente $clientIp:$CAMERA_PORT...")
+                socket = Socket(clientIp, CAMERA_PORT)
+                outputStream = socket?.getOutputStream()
+            }
+
+            val bitmap = imageProxyToBitmap(imageProxy)
+            if (bitmap != null) {
+                val baos = ByteArrayOutputStream()
+                // Compresión balanceada para fluidez en tiempo real
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                val bytes = baos.toByteArray()
+
+                outputStream?.write(ByteBuffer.allocate(4).putInt(bytes.size).array())
+                outputStream?.write(bytes)
+                outputStream?.flush()
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error en procesamiento de cuadro", e)
+            Log.e(TAG, "Error de red enviando frame: ${e.message}")
+            cerrarSockets()
+        } finally {
+            imageProxy.close()
         }
     }
 
-    private fun yuv420ToNv21Optimized(image: ImageProxy): ByteArray {
-        val width = image.width
-        val height = image.height
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+        val buffer = imageProxy.planes[0].buffer
+        val pixelStride = imageProxy.planes[0].pixelStride
+        val rowStride = imageProxy.planes[0].rowStride
+        val rowPadding = rowStride - pixelStride * imageProxy.width
 
-        val yBuffer = yPlane.buffer
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
+        val bitmap = Bitmap.createBitmap(
+            imageProxy.width + rowPadding / pixelStride,
+            imageProxy.height,
+            Bitmap.Config.ARGB_8888
+        )
+        buffer.rewind()
+        bitmap.copyPixelsFromBuffer(buffer)
 
-        val ySize = width * height
-        val nv21 = ByteArray(ySize + (width * height / 2))
-
-        yBuffer.get(nv21, 0, ySize)
-
-        val vRowStride = vPlane.rowStride
-        val vPixelStride = vPlane.pixelStride
-        var chromaOffset = ySize
-
-        val rowBuffer = ByteArray(vRowStride)
-        for (row in 0 until height / 2) {
-            vBuffer.position(row * vRowStride)
-            val remaining = vBuffer.remaining()
-            val bytesToRead = if (vRowStride < remaining) vRowStride else remaining
-            vBuffer.get(rowBuffer, 0, bytesToRead)
-            
-            for (col in 0 until width / 2) {
-                val pixelIndex = col * vPixelStride
-                nv21[chromaOffset++] = rowBuffer[pixelIndex] // V
-                if (pixelIndex < bytesToRead) {
-                    nv21[chromaOffset++] = uBuffer.get(row * uPlane.rowStride + col * uPlane.pixelStride) // U
-                } else {
-                    nv21[chromaOffset++] = 128.toByte()
+        // Corregir la rotación nativa del sensor antes de enviarlo
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        return if (rotationDegrees != 0) {
+            val matrix = Matrix().apply { 
+                postRotate(rotationDegrees.toFloat())
+                // Si es la cámara frontal, aplicar espejo horizontal nativo
+                if (currentFacing == CameraSelector.LENS_FACING_FRONT) {
+                    postScale(-1f, 1f)
                 }
             }
-        }
-        return nv21
-    }
-
-    private fun sendFrame(bytes: ByteArray) {
-        synchronized(netLock) {
-            try {
-                outStream?.let {
-                    it.writeInt(bytes.size)
-                    it.write(bytes)
-                    it.flush()
-                }
-            } catch (e: Exception) {
-                outStream = null
-            }
+            Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height, matrix, true)
+        } else {
+            bitmap
         }
     }
 
-    private fun startReconnectLoop() {
-        synchronized(netLock) {
-            reconnectThread?.interrupt()
-            outStream = null
-        }
-        reconnectThread = thread(start = true) {
-            try {
-                while (isStreaming.get() && !Thread.currentThread().isInterrupted) {
-                    synchronized(netLock) {
-                        if (outStream == null) {
-                            try {
-                                val socket = Socket(clientIp, PORT).apply { tcpNoDelay = true }
-                                outStream = DataOutputStream(socket.getOutputStream())
-                            } catch (_: Exception) {
-                                outStream = null
-                            }
-                        }
-                    }
-                    Thread.sleep(3500)
-                }
-            } catch (_: InterruptedException) {}
-        }
-    }
-
-    private fun sendCameraAvailabilityToClient(available: Boolean, facingId: Int) {
-        thread {
-            try {
-                Socket(clientIp, 9003).use { socket ->
-                    val cmd = if (available) "CAMERA_AVAILABLE:$facingId" else "CAMERA_UNAVAILABLE:$facingId"
-                    socket.getOutputStream().write((cmd + "\n").toByteArray())
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun broadcastCameraEvent(action: String, facingId: Int) {
-        sendBroadcast(Intent(action).apply { putExtra(EXTRA_CAMERA_FACING, facingId) })
+    private fun cerrarSockets() {
+        try {
+            outputStream?.close()
+            socket?.close()
+        } catch (_: Exception) {}
+        socket = null
+        outputStream = null
     }
 
     override fun onDestroy() {
-        isStreaming.set(false)
-        isForegroundAttached = false
-        reconnectThread?.interrupt()
-        cameraProvider?.unbindAll()
+        isStreaming = false
+        cerrarSockets()
         cameraExecutor.shutdown()
-        currentBufferFrame = null
-        synchronized(netLock) {
-            try { outStream?.close() } catch (_: Exception) {}
-            outStream = null
-        }
+        
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
+        
         super.onDestroy()
     }
 }

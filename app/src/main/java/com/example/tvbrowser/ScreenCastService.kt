@@ -1,8 +1,12 @@
 package com.example.tvbrowser
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -11,11 +15,13 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
+import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.net.Socket
@@ -26,8 +32,9 @@ class ScreenCastService : Service() {
     companion object {
         const val TAG = "ScreenCastService"
         const val SCREEN_PORT = 9000
+        private const val NOTIFICATION_ID = 4004
+        private const val CHANNEL_ID = "screencast_channel"
         
-        // Almacena el último frame de forma estática para WebServerService
         @JvmStatic
         var latestFrameProvider: ByteArray? = null
     }
@@ -59,6 +66,9 @@ class ScreenCastService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 🔥 SOLUCIÓN AL CRASH: Levantar la notificación obligatoria de inmediato
+        startForegroundCompat()
+
         clientIp = intent?.getStringExtra("CLIENT_IP")
         val resultCode = intent?.getIntExtra("RESULT_CODE", 0) ?: 0
         val resultData = intent?.getParcelableExtra<Intent>("RESULT_DATA")
@@ -71,6 +81,33 @@ class ScreenCastService : Service() {
         }
 
         return START_STICKY
+    }
+
+    private fun startForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Grabación de Pantalla",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Transmitiendo Pantalla")
+            .setContentText("Compartiendo contenido en tiempo real con el Cliente")
+            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .build()
+
+        // Si estás en Android 10 o superior, es obligatorio declarar el tipo MEDIA_PROJECTION
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startProjection() {
@@ -117,7 +154,6 @@ class ScreenCastService : Service() {
                     val bytes = baos.toByteArray()
                     bitmap.recycle()
 
-                    // Compartir frame con el servidor local HTTP
                     latestFrameProvider = bytes
 
                     outputStream?.write(ByteBuffer.allocate(4).putInt(bytes.size).array())

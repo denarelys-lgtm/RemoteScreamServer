@@ -6,139 +6,140 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
-import kotlinx.coroutines.*
 import java.io.IOException
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
-import java.util.concurrent.ConcurrentHashMap
 
 class WebServerService : Service() {
 
     companion object {
         private const val TAG = "WebServerService"
         private const val PORT = 8080
-        private const val NOTIFICATION_CHANNEL_ID = "web_server_ch"
-        private const val NOTIFICATION_ID = 3
+        private const val NOTIFICATION_ID = 3003
+        private const val CHANNEL_ID = "web_server_channel"
     }
 
-    private var server: LocalHttpServer? = null
-    private val serverScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val activeMjpegClients = ConcurrentHashMap<String, Boolean>()
-
-    override fun onCreate() {
-        super.onCreate()
-        createNotificationChannel()
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundCompat()
-        if (server == null) {
-            try {
-                server = LocalHttpServer(PORT)
-                server?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-                Log.d(TAG, "🌐 Servidor HTTP Local iniciado en el puerto $PORT")
-            } catch (e: IOException) {
-                Log.e(TAG, "❌ Error al iniciar el servidor HTTP", e)
-            }
-        }
-        return START_STICKY
-    }
-
-    private fun startForegroundCompat() {
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Servidor Web Activo")
-            .setContentText("Transmitiendo paneles de control locales...")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-            
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Para Android 14 (API 34) requerimos especificar el tipo DATA_SYNC para el servidor web
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error al iniciar Foreground Service, reintentando modo genérico", e)
-            startForeground(NOTIFICATION_ID, notification)
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "Servidor Web", NotificationManager.IMPORTANCE_LOW)
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
-        }
-    }
-
-    override fun onDestroy() {
-        serverScope.cancel()
-        activeMjpegClients.clear()
-        try {
-            server?.stop()
-            Log.d(TAG, "🌐 Servidor HTTP Local detenido de manera limpia.")
-        } catch (_: Exception) {}
-        super.onDestroy()
-    }
+    private var server: AndroidWebServer? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private inner class LocalHttpServer(port: Int) : NanoHTTPD(port) {
+    override fun onCreate() {
+        super.onCreate()
+        startForegroundServiceCompat()
+        try {
+            server = AndroidWebServer(PORT)
+            server?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            Log.d(TAG, "Servidor HTTP local iniciado en el puerto $PORT")
+        } catch (e: IOException) {
+            Log.e(TAG, "No se pudo iniciar el servidor web local", e)
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return START_STICKY
+    }
+
+    private fun startForegroundServiceCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Servidor Web de Soporte",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Servidor de transmisión local activo")
+            .setContentText("Procesando peticiones HTTP en el puerto $PORT")
+            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        server?.stop()
+        Log.d(TAG, "Servidor HTTP local detenido")
+    }
+
+    private inner class AndroidWebServer(port: Int) : NanoHTTPD(port) {
+        
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
-            return when {
-                uri == "/camera" -> serveMJPEG(isCamera = true)
-                uri == "/screencast" -> serveMJPEG(isCamera = false)
-                else -> newFixedLengthResponse(Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "404 Not Found")
+            return when (uri) {
+                "/camera" -> {
+                    val frameBytes = CameraService.latestFrameProvider
+                    if (frameBytes != null) {
+                        generateMjpegResponse(frameBytes)
+                    } else {
+                        newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Cámara no inicializada o sin frames")
+                    }
+                }
+                "/screencast" -> {
+                    val frameBytes = ScreenCastService.latestFrameProvider
+                    if (frameBytes != null) {
+                        generateMjpegResponse(frameBytes)
+                    } else {
+                        newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Pantalla no compartida o sin frames")
+                    }
+                }
+                else -> newFixedLengthResponse(Response.Status.OK, MIME_HTML, "<h1>Servidor Remoto Activo</h1><p>Rutas: /camera o /screencast</p>")
             }
         }
 
-        private fun serveMJPEG(isCamera: Boolean): Response {
-            val boundary = "mjpegboundary"
-            val pipedOut = PipedOutputStream()
-            val pipedIn = PipedInputStream(pipedOut)
-            val clientId = "${System.currentTimeMillis()}-${Thread.currentThread().id}"
-            activeMjpegClients[clientId] = true
-
-            serverScope.launch(Dispatchers.IO) {
-                try {
-                    val frameProvider = if (isCamera) CameraService.latestFrameProvider else ScreenCastService.latestFrameProvider
-                    while (activeMjpegClients[clientId] == true && coroutineContext.isActive) {
-                        val frame = frameProvider?.getLatestFrame()
-                        if (frame != null) {
-                            try {
-                                pipedOut.write("--$boundary\r\n".toByteArray())
-                                pipedOut.write("Content-Type: image/jpeg\r\n".toByteArray())
-                                pipedOut.write("Content-Length: ${frame.size}\r\n".toByteArray())
-                                pipedOut.write("\r\n".toByteArray())
-                                pipedOut.write(frame)
-                                pipedOut.write("\r\n".toByteArray())
-                                pipedOut.flush()
-                            } catch (e: IOException) {
-                                break
-                            }
-                        }
-                        delay(50)
-                    }
-                } catch (_: Exception) {
-                } finally {
-                    activeMjpegClients.remove(clientId)
-                    try { pipedOut.close() } catch (_: IOException) {}
-                }
+        private fun generateMjpegResponse(frameBytes: ByteArray): Response {
+            val pipedInputStream = PipedInputStream()
+            val pipedOutputStream = PipedOutputStream()
+            
+            try {
+                pipedInputStream.connect(pipedOutputStream)
+            } catch (e: IOException) {
+                return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error de buffer interno")
             }
 
-            val response = newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=$boundary", pipedIn)
-            response.addHeader("Cache-Control", "no-cache")
-            response.addHeader("Connection", "close")
+            // Hilo secundario para inyectar de manera segura el flujo continuo MJPEG
+            Thread {
+                try {
+                    val boundary = "---jpg_boundary---"
+                    // Corrección estricta de la firma write() pasando un ByteArray explícito
+                    val header = ("HTTP/1.0 200 OK\r\n" +
+                            "Server: RemoteScream\r\n" +
+                            "Connection: close\r\n" +
+                            "Content-Type: multipart/x-mixed-replace;boundary=$boundary\r\n\r\n").toByteArray()
+                    
+                    pipedOutputStream.write(header)
+                    pipedOutputStream.flush()
+
+                    // Enviamos el frame actual disponible
+                    val frameHeader = ("--$boundary\r\n" +
+                            "Content-Type: image/jpeg\r\n" +
+                            "Content-Length: ${frameBytes.size}\r\n\r\n").toByteArray()
+                    
+                    pipedOutputStream.write(frameHeader)
+                    pipedOutputStream.write(frameBytes) // Envío del buffer directo
+                    pipedOutputStream.write("\r\n".toByteArray())
+                    pipedOutputStream.flush()
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Conexión de stream cerrada por el cliente HTTP")
+                } finally {
+                    try { pipedOutputStream.close() } catch (_: Exception) {}
+                }
+            }.start()
+
+            val response = newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=---jpg_boundary---", pipedInputStream)
+            response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Connection", "keep-alive")
             return response
         }
     }

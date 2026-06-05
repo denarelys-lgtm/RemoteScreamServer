@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -55,8 +56,21 @@ class WebServerService : Service() {
             .setContentText("Transmitiendo paneles de control locales...")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
-        startForeground(NOTIFICATION_ID, notification)
+            
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Para Android 14 (API 34) requerimos especificar el tipo DATA_SYNC para el servidor web
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al iniciar Foreground Service, reintentando modo genérico", e)
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun createNotificationChannel() {
@@ -110,11 +124,10 @@ class WebServerService : Service() {
                                 pipedOut.write("\r\n".toByteArray())
                                 pipedOut.flush()
                             } catch (e: IOException) {
-                                // Se genera cuando el navegador o reproductor remoto cierra el stream
                                 break
                             }
                         }
-                        delay(50) // Controla los cuadros por segundo del stream MJPEG (aprox 20 FPS)
+                        delay(50)
                     }
                 } catch (_: Exception) {
                 } finally {

@@ -6,7 +6,6 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.*
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.hardware.camera2.CameraCharacteristics
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -16,7 +15,6 @@ import android.net.wifi.WifiManager
 import android.os.*
 import android.provider.Settings
 import android.util.Log
-import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.Toast
@@ -60,15 +58,13 @@ class MainActivity : AppCompatActivity() {
     private val cameraEventReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                CameraService.ACTION_CAMERA_AVAILABLE -> {
-                    val facing = intent.getIntExtra(CameraService.EXTRA_CAMERA_FACING, -1)
-                    val name = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
+                ACTION_CAMERA_AVAILABLE -> {
+                    val facing = intent.getIntExtra(EXTRA_CAMERA_FACING, -1)
+                    val name = if (facing == 1) "frontal" else "trasera"
                     Toast.makeText(this@MainActivity, "Cámara $name disponible", Toast.LENGTH_SHORT).show()
                 }
-                CameraService.ACTION_CAMERA_UNAVAILABLE -> {
-                    val facing = intent.getIntExtra(CameraService.EXTRA_CAMERA_FACING, -1)
-                    val name = if (facing == CameraCharacteristics.LENS_FACING_BACK) "trasera" else "frontal"
-                    Toast.makeText(this@MainActivity, "Cámara $name en uso por otra app", Toast.LENGTH_SHORT).show()
+                ACTION_CAMERA_UNAVAILABLE -> {
+                    Toast.makeText(this@MainActivity, "Cámara detenida o no disponible", Toast.LENGTH_SHORT).show()
                 }
                 "STOP_CAMERA_FROM_NOTIFICATION" -> stopCameraService()
             }
@@ -129,8 +125,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun registerCameraReceiver() {
         val filter = IntentFilter().apply {
-            addAction(CameraService.ACTION_CAMERA_AVAILABLE)
-            addAction(CameraService.ACTION_CAMERA_UNAVAILABLE)
+            addAction(ACTION_CAMERA_AVAILABLE)
+            addAction(ACTION_CAMERA_UNAVAILABLE)
             addAction("STOP_CAMERA_FROM_NOTIFICATION")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -183,7 +179,6 @@ class MainActivity : AppCompatActivity() {
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
     }
 
-    // 🔥 MODIFICADO: Adaptado completamente con el puente InvisibleTrampolineActivity para compatibilidad con Android 16
     private fun startCommandListener() {
         listeningThread = thread(start = true) {
             try {
@@ -206,13 +201,12 @@ class MainActivity : AppCompatActivity() {
                                     pendingCameraFacing = CameraCharacteristics.LENS_FACING_BACK
                                     ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
                                 } else {
-                                    // Pasamos por la actividad trampolín para heredar foco de primer plano seguro en Android 16
                                     val intent = Intent(this@MainActivity, InvisibleTrampolineActivity::class.java).apply {
                                         putExtra("FACING", 0) 
                                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                                     }
                                     startActivity(intent)
-                                    prefs.edit().putInt("last_camera_facing", CameraCharacteristics.LENS_FACING_BACK).apply()
+                                    prefs.edit().putInt("last_camera_facing", 0).apply()
                                 }
                             }
                             "START_FRONT" -> {
@@ -225,7 +219,7 @@ class MainActivity : AppCompatActivity() {
                                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                                     }
                                     startActivity(intent)
-                                    prefs.edit().putInt("last_camera_facing", CameraCharacteristics.LENS_FACING_FRONT).apply()
+                                    prefs.edit().putInt("last_camera_facing", 1).apply()
                                 }
                             }
                             "STOP_CAMERA", "STOP" -> stopCameraService()
@@ -241,8 +235,10 @@ class MainActivity : AppCompatActivity() {
     private fun startCameraService(facing: Int) {
         stopCameraService() 
 
+        val savedClientIp = prefs.getString("client_ip", "")
         val intent = Intent(this, CameraService::class.java).apply {
             putExtra("FACING", facing)
+            putExtra("CLIENT_IP", savedClientIp) // Crucial para la conexión TCP saliente
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -261,7 +257,6 @@ class MainActivity : AppCompatActivity() {
         val lastFacing = prefs.getInt("last_camera_facing", -1)
         if (lastFacing != -1) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                // Para restauraciones internas locales directas cuando la app ya está visible
                 startCameraService(lastFacing)
             } else {
                 prefs.edit().remove("last_camera_facing").apply()
@@ -299,7 +294,6 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CAMERA_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            // Mapeamos el ID correcto para el disparo inicial tras otorgar permiso físico
             val targetFacing = if (pendingCameraFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else 0
             val intent = Intent(this, InvisibleTrampolineActivity::class.java).apply {
                 putExtra("FACING", targetFacing)
@@ -323,9 +317,11 @@ class MainActivity : AppCompatActivity() {
         when (requestCode) {
             SCREEN_CAPTURE_REQUEST_CODE -> {
                 if (resultCode == Activity.RESULT_OK && data != null) {
+                    val savedClientIp = prefs.getString("client_ip", "")
                     val serviceIntent = Intent(this, ScreenCastService::class.java).apply {
                         putExtra("RESULT_CODE", resultCode)
-                        putExtra("DATA", data)
+                        putExtra("RESULT_DATA", data) // Nombre corregido para empatar con ScreenCastService
+                        putExtra("CLIENT_IP", savedClientIp) // Enviar destino TCP de la TV
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(serviceIntent)
@@ -345,14 +341,24 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(cameraEventReceiver)
+        try { unregisterReceiver(cameraEventReceiver) } catch (_: Exception) {}
         listeningThread?.interrupt()
         try { serverSocket?.close() } catch (e: Exception) {}
         unregisterMdnsService()
     }
 
     private fun unregisterMdnsService() {
-        registrationListener?.let { nsdManager.unregisterService(it) }
-        multicastLock?.release()
+        try {
+            registrationListener?.let { nsdManager.unregisterService(it) }
+        } catch (_: Exception) {}
+        try {
+            multicastLock?.release()
+        } catch (_: Exception) {}
+    }
+
+    companion object {
+        const val ACTION_CAMERA_AVAILABLE = "CAMERA_AVAILABLE"
+        const val ACTION_CAMERA_UNAVAILABLE = "CAMERA_UNAVAILABLE"
+        const val EXTRA_CAMERA_FACING = "FACING"
     }
 }

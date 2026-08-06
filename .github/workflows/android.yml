@@ -1,4 +1,4 @@
-name: Build Android TV Browser APK (UI)
+name: Build Task App APK
 
 on:
   push:
@@ -27,5 +27,5 @@ jobs:
       - run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: tvbrowser-debug-apk
+          name: taskapp-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
